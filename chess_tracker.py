@@ -3,6 +3,7 @@ import re
 import glob
 import json
 import time
+import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tkinter as tk
@@ -29,6 +30,12 @@ PIECE_TYPE_MAP = {
     'r': chess.ROOK,
     'q': chess.QUEEN,
     'k': chess.KING,
+}
+
+ARROW_COLORS = {
+    1: "#f59e0b",  # Rank 1 (thickest) - Amber/Gold
+    2: "#38bdf8",  # Rank 2 (normal)   - Sky Blue
+    3: "#c084fc",  # Rank 3 (thin)     - Purple
 }
 
 TAMPERMONKEY_SCRIPT = f"""// ==UserScript==
@@ -343,6 +350,9 @@ class ChessScreenApp:
         self.selected_square = None
         self.legal_targets_for_selected = set()
 
+        # Arrows for Top 3 recommended moves: list of (rank_int, chess.Move)
+        self.top3_arrows = []
+
         self.engine = None
         self.engine_path = self._auto_find_rodent()
         self.engine_lock = threading.Lock()
@@ -386,60 +396,60 @@ class ChessScreenApp:
             return {
                 "rank_short": "MAX (~2975)",
                 "rank_desc": "MAX (~2975 Elo)",
-                "primary_time": 0.65,
-                "refine_time": 0.32,
-                "screen_time": 0.05,
-                "max_candidates": 8,
-                "max_depth": 13,
-                "est_top3": 3.4,
+                "primary_time": 0.90,
+                "refine_time": 0.45,
+                "screen_time": 0.06,
+                "max_candidates": 9,
+                "max_depth": 14,
+                "est_top3": 2.3,
                 "est_eval": 0.8,
             }
         elif elo >= 2400:
             return {
                 "rank_short": f"{elo} Elo",
                 "rank_desc": f"{elo} Elo (Grandmaster)",
-                "primary_time": 0.55,
-                "refine_time": 0.28,
+                "primary_time": 0.75,
+                "refine_time": 0.38,
                 "screen_time": 0.05,
                 "max_candidates": 8,
-                "max_depth": 12,
-                "est_top3": 3.0,
+                "max_depth": 13,
+                "est_top3": 1.9,
                 "est_eval": 0.7,
             }
         elif elo >= 2000:
             return {
                 "rank_short": f"{elo} Elo",
                 "rank_desc": f"{elo} Elo (Master)",
-                "primary_time": 0.45,
-                "refine_time": 0.24,
-                "screen_time": 0.04,
-                "max_candidates": 7,
-                "max_depth": 11,
-                "est_top3": 2.4,
+                "primary_time": 0.60,
+                "refine_time": 0.30,
+                "screen_time": 0.05,
+                "max_candidates": 8,
+                "max_depth": 12,
+                "est_top3": 1.6,
                 "est_eval": 0.6,
             }
         elif elo >= 1500:
             return {
                 "rank_short": f"{elo} Elo",
                 "rank_desc": f"{elo} Elo (Intermediate)",
-                "primary_time": 0.35,
-                "refine_time": 0.18,
+                "primary_time": 0.45,
+                "refine_time": 0.24,
                 "screen_time": 0.04,
-                "max_candidates": 6,
-                "max_depth": 10,
-                "est_top3": 1.8,
+                "max_candidates": 7,
+                "max_depth": 11,
+                "est_top3": 1.2,
                 "est_eval": 0.5,
             }
         else:
             return {
                 "rank_short": f"{elo} Elo",
                 "rank_desc": f"{elo} Elo (Beginner / Club)",
-                "primary_time": 0.22,
-                "refine_time": 0.12,
+                "primary_time": 0.28,
+                "refine_time": 0.15,
                 "screen_time": 0.03,
                 "max_candidates": 5,
-                "max_depth": 8,
-                "est_top3": 1.2,
+                "max_depth": 9,
+                "est_top3": 0.8,
                 "est_eval": 0.3,
             }
 
@@ -693,6 +703,10 @@ class ChessScreenApp:
             self._board_state_signature(reconstructed) != self._board_state_signature(self.board)
         )
         self.board = reconstructed
+
+        if board_changed:
+            self.top3_arrows = []
+
         self._draw_board()
         self._update_pgn_display()
 
@@ -918,7 +932,6 @@ class ChessScreenApp:
         main_container = tk.Frame(self.root, bg="#000000")
         main_container.pack(fill="both", expand=True, padx=14, pady=10)
 
-        # Pack fixed-width right panel FIRST so it never gets squeezed on resize
         right_frame = tk.Frame(
             main_container,
             bg="#0a0a0a",
@@ -929,7 +942,6 @@ class ChessScreenApp:
         right_frame.pack(side=tk.RIGHT, fill="y", padx=(12, 0))
         right_frame.pack_propagate(False)
 
-        # Left panel takes all remaining horizontal & vertical space (mostly for the board)
         left_frame = tk.Frame(main_container, bg="#000000")
         left_frame.pack(side=tk.LEFT, fill="both", expand=True)
 
@@ -1006,7 +1018,6 @@ class ChessScreenApp:
         )
         self.status_label.pack(side=tk.TOP, fill="x", pady=(2, 4))
 
-        # Bottom PGN box packed BEFORE board_stage_frame so the board absorbs vertical scaling
         pgn_container = tk.Frame(left_frame, bg="#000000")
         pgn_container.pack(side=tk.BOTTOM, fill="x", padx=12, pady=(4, 2))
 
@@ -1034,7 +1045,6 @@ class ChessScreenApp:
         )
         self.pgn_text.pack(fill="x")
 
-        # Scalable stage for the chessboard + eval bar
         self.board_stage_frame = tk.Frame(left_frame, bg="#000000")
         self.board_stage_frame.pack(side=tk.TOP, fill="both", expand=True)
         self.board_stage_frame.bind("<Configure>", self._on_board_stage_resize)
@@ -1132,7 +1142,7 @@ class ChessScreenApp:
 
         self.elo_time_hint_lbl = tk.Label(
             diff_frame,
-            text="Rank: 1500 Elo | Est: ~1.8s (cap 5s)",
+            text="Rank: 1500 Elo | Est: ~1.2s (cap 5s)",
             bg="#111111",
             fg="#9ca3af",
             font=("Consolas", 8)
@@ -1167,7 +1177,7 @@ class ChessScreenApp:
 
         self.chk_top3 = tk.Checkbutton(
             right_frame,
-            text=f"Top 3 Moves WHITE & BLACK (max {MAX_ANALYSIS_SECONDS:.0f}s cap)",
+            text=f"Top 3 Moves + Arrows (max {MAX_ANALYSIS_SECONDS:.0f}s cap)",
             variable=self.show_top3_var,
             command=self._on_toggle_top3,
             bg="#0a0a0a",
@@ -1209,45 +1219,31 @@ class ChessScreenApp:
             font=("Consolas", 8, "bold"),
             anchor="w"
         )
-        self.side1_header_lbl.pack(fill="x", padx=8, pady=(5, 1))
+        self.side1_header_lbl.pack(fill="x", padx=8, pady=(6, 2))
 
-        self.side1_moves_lbl = tk.Label(
+        self.top3_text = tk.Text(
             self.top3_frame,
-            text="Check box to calculate.",
+            height=4,
             bg="#121212",
             fg="#00ff66",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
             font=("Consolas", 8),
-            justify="left",
-            anchor="nw",
-            wraplength=385,
-            height=3
+            wrap="none",
+            padx=10,
+            pady=2,
+            cursor="arrow"
         )
-        self.side1_moves_lbl.pack(fill="x", padx=10, pady=(0, 4))
-
-        tk.Frame(self.top3_frame, bg="#262626", height=1).pack(fill="x", padx=8, pady=2)
-
-        self.side2_header_lbl = tk.Label(
-            self.top3_frame,
-            text="⚫ BLACK (top replies):",
-            bg="#121212",
-            fg="#fbbf24",
-            font=("Consolas", 8, "bold"),
-            anchor="w"
-        )
-        self.side2_header_lbl.pack(fill="x", padx=8, pady=(3, 1))
-
-        self.side2_moves_lbl = tk.Label(
-            self.top3_frame,
-            text="--",
-            bg="#121212",
-            fg="#a7f3d0",
-            font=("Consolas", 8),
-            justify="left",
-            anchor="nw",
-            wraplength=385,
-            height=3
-        )
-        self.side2_moves_lbl.pack(fill="x", padx=10, pady=(0, 6))
+        self.top3_text.tag_configure("rank1", foreground="#f59e0b", font=("Consolas", 8, "bold"))
+        self.top3_text.tag_configure("rank2", foreground="#38bdf8", font=("Consolas", 8, "bold"))
+        self.top3_text.tag_configure("rank3", foreground="#c084fc", font=("Consolas", 8, "bold"))
+        self.top3_text.tag_configure("move_text", foreground="#e5e7eb", font=("Consolas", 8))
+        self.top3_text.tag_configure("info_text", foreground="#6b7280", font=("Consolas", 8))
+        self.top3_text.tag_configure("warn_text", foreground="#fbbf24", font=("Consolas", 8))
+        self.top3_text.tag_configure("err_text", foreground="#ff5555", font=("Consolas", 8))
+        self.top3_text.pack(fill="x", pady=(0, 6))
+        self._set_top3_message("Check box to calculate & show board arrows.", "info_text")
 
         sandbox_box = tk.Frame(
             right_frame,
@@ -1305,6 +1301,24 @@ class ChessScreenApp:
         )
         self.move_verdict_lbl.pack(fill="both", expand=True, padx=8, pady=(2, 6))
 
+    def _set_top3_message(self, msg, tag="info_text"):
+        self.top3_text.config(state="normal")
+        self.top3_text.delete("1.0", tk.END)
+        self.top3_text.insert(tk.END, msg, tag)
+        self.top3_text.config(state="disabled")
+
+    def _set_top3_lines(self, lines):
+        self.top3_text.config(state="normal")
+        self.top3_text.delete("1.0", tk.END)
+        thickness_labels = {1: "━━", 2: "──", 3: "┄┄"}
+        for idx, (r, san, sc, ln, _, _) in enumerate(lines):
+            if idx > 0:
+                self.top3_text.insert(tk.END, "\n")
+            arrow_sym = thickness_labels.get(r, "--")
+            self.top3_text.insert(tk.END, f"{r}. [{arrow_sym}] ", f"rank{r}")
+            self.top3_text.insert(tk.END, f"{san} [{sc}] -> {ln}", "move_text")
+        self.top3_text.config(state="disabled")
+
     # ================= DYNAMIC BOARD RESIZING =================
     def _recalculate_board_size(self, stage_w=None, stage_h=None):
         if stage_w is None:
@@ -1355,6 +1369,7 @@ class ChessScreenApp:
             self.sandbox_mode = False
             self.selected_square = None
             self.legal_targets_for_selected = set()
+            self.top3_arrows = []
 
             if self.live_board_backup is not None:
                 self.board = self.live_board_backup.copy(stack=True)
@@ -1405,6 +1420,7 @@ class ChessScreenApp:
 
                 self.selected_square = None
                 self.legal_targets_for_selected = set()
+                self.top3_arrows = []
                 self._draw_board()
                 self._update_pgn_display()
                 self._evaluate_tried_move(board_before, board_after, move, san_move)
@@ -1560,9 +1576,13 @@ class ChessScreenApp:
     def _compute_top3_distinct_locked(
         self, board_obj, gen, t_start, primary_t, refine_t, screen_t, max_cand, max_depth
     ):
+        """
+        Returns (results_list, max_depth_reached) where each entry in results_list is:
+        (rank_int, san_str, eval_str, line_str, eval_cp, chess.Move)
+        """
         legal_moves = list(board_obj.legal_moves)
         if not legal_moves:
-            return [], 0, None
+            return [], 0
 
         mover_is_white = (board_obj.turn == chess.WHITE)
         max_depth_reached = 0
@@ -1570,13 +1590,13 @@ class ChessScreenApp:
 
         rem = MAX_ANALYSIS_SECONDS - (time.monotonic() - t_start) - 0.15
         if rem <= 0.15 or self.analysis_generation != gen:
-            return [], 0, None
+            return [], 0
 
         t1 = min(primary_t, max(0.15, rem))
         info1 = self.engine.analyse(board_obj, chess.engine.Limit(time=t1, depth=max_depth))
         pv1 = info1.get("pv", [])
         if not pv1 or "score" not in info1:
-            return [], 0, None
+            return [], 0
 
         best_mv1 = pv1[0]
         max_depth_reached = max(max_depth_reached, info1.get("depth", 0))
@@ -1587,17 +1607,17 @@ class ChessScreenApp:
         for m in pv1[:3]:
             line1_sans.append(temp_b.san(m))
             temp_b.push(m)
-        results.append((1, board_obj.san(best_mv1), eval_str1, " ".join(line1_sans), eval_cp1))
+        results.append((1, board_obj.san(best_mv1), eval_str1, " ".join(line1_sans), eval_cp1, best_mv1))
 
         if len(legal_moves) == 1:
-            return results, max_depth_reached, best_mv1
+            return results, max_depth_reached
 
         candidates = self._rank_candidate_moves(board_obj, exclude_move=best_mv1)[:max_cand]
         screened = []
 
         for mv in candidates:
             if self.analysis_generation != gen:
-                return results, max_depth_reached, best_mv1
+                return results, max_depth_reached
             rem = MAX_ANALYSIS_SECONDS - (time.monotonic() - t_start) - 0.25
             if rem <= 0.20:
                 break
@@ -1618,7 +1638,7 @@ class ChessScreenApp:
 
         for _, mv_alt, fallback_pv in screened[:2]:
             if self.analysis_generation != gen:
-                return results, max_depth_reached, best_mv1
+                return results, max_depth_reached
             rem = MAX_ANALYSIS_SECONDS - (time.monotonic() - t_start) - 0.15
             if rem <= 0.15:
                 break
@@ -1630,7 +1650,7 @@ class ChessScreenApp:
             if b_child.is_checkmate():
                 mate_str = "#M1" if mover_is_white else "#M-1"
                 mate_cp = 10.0 if mover_is_white else -10.0
-                results.append((len(results) + 1, san_alt, mate_str, san_alt, mate_cp))
+                results.append((len(results) + 1, san_alt, mate_str, san_alt, mate_cp, mv_alt))
                 continue
 
             rt = min(refine_t, max(0.15, rem))
@@ -1647,9 +1667,9 @@ class ChessScreenApp:
                 for m in pv_r[:2]:
                     line_sans.append(temp_b.san(m))
                     temp_b.push(m)
-                results.append((len(results) + 1, san_alt, ev_str, " ".join(line_sans), ev_cp))
+                results.append((len(results) + 1, san_alt, ev_str, " ".join(line_sans), ev_cp, mv_alt))
 
-        return results, max_depth_reached, best_mv1
+        return results, max_depth_reached
 
     # ================= EVALUATION & TOP 3 (5S CAP) =================
     def _on_toggle_eval_bar(self):
@@ -1673,12 +1693,13 @@ class ChessScreenApp:
                 return
             self._request_engine_analysis()
         else:
+            self.top3_arrows = []
+            self._draw_board()
             self.top3_meta_lbl.config(
                 text=f"Rank: {self._get_rank_profile()['rank_short']} | Time: -- (cap {MAX_ANALYSIS_SECONDS:.0f}s)",
                 fg="#60a5fa"
             )
-            self.side1_moves_lbl.config(text="Check box to calculate.", fg="#6b7280")
-            self.side2_moves_lbl.config(text="--", fg="#6b7280")
+            self._set_top3_message("Check box to calculate & show board arrows.", "info_text")
 
     def _ensure_engine_ready(self):
         if self.engine is not None:
@@ -1734,7 +1755,7 @@ class ChessScreenApp:
             return
         if not self.board.is_valid():
             if self.show_top3_var.get():
-                self.side1_moves_lbl.config(text="Invalid board position.", fg="#ff5555")
+                self._set_top3_message("Invalid board position.", "err_text")
             return
 
         self.analysis_generation += 1
@@ -1751,18 +1772,15 @@ class ChessScreenApp:
         active_is_white = (board_snapshot.turn == chess.WHITE)
         if active_is_white:
             self.side1_header_lbl.config(text="⚪ WHITE (to move):", fg="#f8fafc")
-            self.side2_header_lbl.config(text="⚫ BLACK (replies to #1):", fg="#fbbf24")
         else:
             self.side1_header_lbl.config(text="⚫ BLACK (to move):", fg="#fbbf24")
-            self.side2_header_lbl.config(text="⚪ WHITE (replies to #1):", fg="#f8fafc")
 
         if want_top3:
             self.top3_meta_lbl.config(
                 text=f"⏳ {prof['rank_short']} | 0.0s / cap {MAX_ANALYSIS_SECONDS:.0f}s (est. ~{est_sec:.1f}s)",
                 fg="#fbbf24"
             )
-            self.side1_moves_lbl.config(text="Calculating moves...", fg="#fbbf24")
-            self.side2_moves_lbl.config(text="Calculating replies...", fg="#fbbf24")
+            self._set_top3_message("Calculating top 3 moves...", "warn_text")
 
         if self.show_eval_var.get():
             self.eval_detail_lbl.config(
@@ -1791,8 +1809,6 @@ class ChessScreenApp:
 
     def _run_engine_worker(self, board_snapshot, fen_snapshot, want_top3, gen, prof, t_start):
         side1_lines = []
-        side2_lines = []
-        best_mv1 = None
         best_eval_cp = 0.0
         best_eval_str = "0.0"
         max_reached_depth = 0
@@ -1816,7 +1832,7 @@ class ChessScreenApp:
                         best_eval_str, best_eval_cp, _ = self._format_score_white(res["score"])
                         max_reached_depth = res.get("depth", 0)
                 else:
-                    side1_lines, d1, best_mv1 = self._compute_top3_distinct_locked(
+                    side1_lines, d1 = self._compute_top3_distinct_locked(
                         board_snapshot,
                         gen=gen,
                         t_start=t_start,
@@ -1831,24 +1847,6 @@ class ChessScreenApp:
                     if side1_lines:
                         best_eval_str = side1_lines[0][2]
                         best_eval_cp = side1_lines[0][4]
-
-                    if best_mv1 is not None and self.analysis_generation == gen:
-                        rem = MAX_ANALYSIS_SECONDS - (time.monotonic() - t_start) - 0.25
-                        if rem > 0.30:
-                            board_reply = board_snapshot.copy(stack=False)
-                            board_reply.push(best_mv1)
-                            if list(board_reply.legal_moves):
-                                side2_lines, d2, _ = self._compute_top3_distinct_locked(
-                                    board_reply,
-                                    gen=gen,
-                                    t_start=t_start,
-                                    primary_t=prof["primary_time"] * 0.85,
-                                    refine_t=prof["refine_time"] * 0.85,
-                                    screen_t=prof["screen_time"],
-                                    max_cand=max(4, prof["max_candidates"] - 2),
-                                    max_depth=max(6, prof["max_depth"] - 1),
-                                )
-                                max_reached_depth = max(max_reached_depth, d2)
             except Exception as e:
                 error_msg = str(e)
 
@@ -1861,9 +1859,10 @@ class ChessScreenApp:
             self.is_analyzing = False
 
             if error_msg:
+                self.top3_arrows = []
+                self._draw_board()
                 self.top3_meta_lbl.config(text=f"Error | {total_elapsed:.1f}s", fg="#ff5555")
-                self.side1_moves_lbl.config(text=f"Rodent IV error: {error_msg}", fg="#ff5555")
-                self.side2_moves_lbl.config(text="--", fg="#6b7280")
+                self._set_top3_message(f"Rodent IV error: {error_msg}", "err_text")
                 return
 
             self.current_eval_cp = best_eval_cp
@@ -1885,30 +1884,25 @@ class ChessScreenApp:
                 )
 
                 active_is_white = (board_snapshot.turn == chess.WHITE)
-                best_san1 = side1_lines[0][1] if side1_lines else "?"
-
                 if active_is_white:
                     self.side1_header_lbl.config(text="⚪ WHITE (to move):", fg="#f8fafc")
-                    self.side2_header_lbl.config(text=f"⚫ BLACK (after 1. {best_san1}):", fg="#fbbf24")
                 else:
                     self.side1_header_lbl.config(text="⚫ BLACK (to move):", fg="#fbbf24")
-                    self.side2_header_lbl.config(text=f"⚪ WHITE (after 1... {best_san1}):", fg="#f8fafc")
 
                 if not side1_lines:
-                    self.side1_moves_lbl.config(text="No legal moves available.", fg="#9ca3af")
+                    self.top3_arrows = []
+                    self._set_top3_message("No legal moves available.", "info_text")
                 else:
-                    fmt1 = [f"{r}. {san} [{sc}] -> {ln}" for r, san, sc, ln, _ in side1_lines]
-                    self.side1_moves_lbl.config(text="\n".join(fmt1), fg="#00ff66")
+                    self.top3_arrows = [
+                        (r, mv_obj) for r, _, _, _, _, mv_obj in side1_lines if mv_obj is not None
+                    ]
+                    self._set_top3_lines(side1_lines)
 
-                if not side2_lines:
-                    self.side2_moves_lbl.config(text="Game over / no replies.", fg="#9ca3af")
-                else:
-                    fmt2 = [f"{r}. {san} [{sc}] -> {ln}" for r, san, sc, ln, _ in side2_lines]
-                    self.side2_moves_lbl.config(text="\n".join(fmt2), fg="#38bdf8")
+                self._draw_board()
 
         self.root.after(0, update_ui)
 
-    # ================= BOARD DRAWING & PGN =================
+    # ================= BOARD DRAWING (COORDINATES + ARROWS) & PGN =================
     def _toggle_flip(self):
         self.flipped = not self.flipped
         self._draw_board()
@@ -1920,6 +1914,7 @@ class ChessScreenApp:
         self.live_board_backup = None
         self.selected_square = None
         self.legal_targets_for_selected = set()
+        self.top3_arrows = []
         self.known_san_sequence = []
         self.history_info = (0, 0)
         self.exit_try_btn.config(state="disabled", bg="#374151")
@@ -1930,6 +1925,72 @@ class ChessScreenApp:
         self._update_pgn_display()
         self._request_engine_analysis()
 
+    def _square_to_canvas_center(self, square):
+        file_idx = chess.square_file(square)
+        rank_idx = chess.square_rank(square)
+        col = 7 - file_idx if self.flipped else file_idx
+        row = rank_idx if self.flipped else 7 - rank_idx
+        sq = self.board_size / 8.0
+        return (col + 0.5) * sq, (row + 0.5) * sq
+
+    def _draw_move_arrows(self):
+        if not self.show_top3_var.get() or not self.top3_arrows:
+            return
+
+        sq = self.board_size / 8.0
+
+        # Thickness settings: Rank 1 = thickest, Rank 2 = normal, Rank 3 = thin
+        style_map = {
+            1: (
+                ARROW_COLORS[1],
+                max(8, round(sq * 0.21)),
+                (round(sq * 0.33), round(sq * 0.37), round(sq * 0.21)),
+            ),
+            2: (
+                ARROW_COLORS[2],
+                max(5, round(sq * 0.12)),
+                (round(sq * 0.24), round(sq * 0.27), round(sq * 0.14)),
+            ),
+            3: (
+                ARROW_COLORS[3],
+                max(2, round(sq * 0.055)),
+                (round(sq * 0.16), round(sq * 0.19), round(sq * 0.09)),
+            ),
+        }
+
+        # Draw Rank 3 -> Rank 2 -> Rank 1 so #1 is always cleanly visible on top
+        for rank_num, move in sorted(self.top3_arrows, key=lambda item: item[0], reverse=True):
+            if rank_num not in style_map:
+                continue
+            color, width, arrow_shape = style_map[rank_num]
+            x1, y1 = self._square_to_canvas_center(move.from_square)
+            x2, y2 = self._square_to_canvas_center(move.to_square)
+
+            dx = x2 - x1
+            dy = y2 - y1
+            dist = math.hypot(dx, dy)
+            if dist < 1e-3:
+                continue
+
+            ux = dx / dist
+            uy = dy / dist
+            start_pad = sq * 0.16
+            end_pad = sq * 0.12
+
+            sx = x1 + ux * start_pad
+            sy = y1 + uy * start_pad
+            ex = x2 - ux * end_pad
+            ey = y2 - uy * end_pad
+
+            self.canvas.create_line(
+                sx, sy, ex, ey,
+                fill=color,
+                width=width,
+                arrow=tk.LAST,
+                arrowshape=arrow_shape,
+                capstyle=tk.ROUND
+            )
+
     def _draw_board(self):
         self.canvas.delete("all")
         light_color = "#ebecd0"
@@ -1937,6 +1998,8 @@ class ChessScreenApp:
 
         sq = self.board_size / 8.0
         font_px = max(16, int(sq * 0.62))
+        coord_px = max(8, int(sq * 0.18))
+        coord_pad = max(3, int(sq * 0.06))
         dot_r = max(5, int(sq * 0.16))
 
         for row in range(8):
@@ -1952,12 +2015,37 @@ class ChessScreenApp:
                 rank_idx = row if self.flipped else 7 - row
                 square = chess.square(file_idx, rank_idx)
 
+                is_light = ((row + col) % 2 == 0)
                 if square == self.selected_square:
                     color = "#f6f669"
+                    coord_fg = dark_color
                 else:
-                    color = light_color if (row + col) % 2 == 0 else dark_color
+                    color = light_color if is_light else dark_color
+                    coord_fg = dark_color if is_light else light_color
 
                 self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="")
+
+                # Rank numbers (1-8) along the left edge
+                if col == 0:
+                    self.canvas.create_text(
+                        x1 + coord_pad,
+                        y1 + coord_pad,
+                        text=str(rank_idx + 1),
+                        anchor="nw",
+                        font=("Consolas", coord_px, "bold"),
+                        fill=coord_fg
+                    )
+
+                # File letters (a-h) along the bottom edge
+                if row == 7:
+                    self.canvas.create_text(
+                        x2 - coord_pad,
+                        y2 - coord_pad,
+                        text=chr(ord('a') + file_idx),
+                        anchor="se",
+                        font=("Consolas", coord_px, "bold"),
+                        fill=coord_fg
+                    )
 
                 if square in self.legal_targets_for_selected:
                     self.canvas.create_oval(
@@ -1984,6 +2072,9 @@ class ChessScreenApp:
                         font=("Segoe UI Symbol", font_px),
                         fill=fg_color
                     )
+
+        # Draw Top 3 recommendation arrows on top
+        self._draw_move_arrows()
 
     def _update_pgn_display(self):
         game = chess.pgn.Game.from_board(self.board)
