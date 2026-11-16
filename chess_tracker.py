@@ -34,7 +34,7 @@ PIECE_TYPE_MAP = {
 
 ARROW_COLORS = {
     1: "#f59e0b",  # Rank 1 (thickest) - Amber/Gold
-    2: "#38bdf8",  # Rank 2 (normal)   - Sky Blue
+    2: "#38bdf8",  # Rank 2 (medium)   - Sky Blue
     3: "#c084fc",  # Rank 3 (thin)     - Purple
 }
 
@@ -325,11 +325,112 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+class DarkAutoScrollbar(tk.Canvas):
+    """Sleek dark-themed scrollbar that automatically hides when all content fits."""
+
+    def __init__(
+        self,
+        parent,
+        command=None,
+        width=7,
+        bg="#0d0d0d",
+        thumb_color="#2a2a2e",
+        hover_color="#4b5563",
+    ):
+        super().__init__(
+            parent,
+            width=width,
+            bg=bg,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.command = command
+        self.thumb_color = thumb_color
+        self.hover_color = hover_color
+        self.first = 0.0
+        self.last = 1.0
+        self._dragging = False
+        self._hovering = False
+        self._drag_offset = 0.0
+        self._visible = False
+
+        self.bind("<Configure>", lambda _e: self._redraw())
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", self._on_release)
+
+    def set(self, first, last):
+        self.first = float(first)
+        self.last = float(last)
+        if self.first <= 0.0 and self.last >= 1.0:
+            if self._visible:
+                self._visible = False
+                self.grid_remove()
+        else:
+            if not self._visible:
+                self._visible = True
+                self.grid()
+            self._redraw()
+
+    def _redraw(self):
+        self.delete("all")
+        if not self._visible:
+            return
+        h = self.winfo_height()
+        w = self.winfo_width()
+        if h <= 1 or w <= 1:
+            return
+
+        y1 = max(2, int(self.first * h) + 2)
+        y2 = min(h - 2, max(y1 + 16, int(self.last * h) - 2))
+        color = self.hover_color if (self._hovering or self._dragging) else self.thumb_color
+        self.create_rectangle(1, y1, w - 1, y2, fill=color, outline="")
+
+    def _on_enter(self, _event):
+        self._hovering = True
+        self._redraw()
+
+    def _on_leave(self, _event):
+        self._hovering = False
+        self._redraw()
+
+    def _on_press(self, event):
+        h = max(1, self.winfo_height())
+        thumb_y1 = self.first * h
+        thumb_y2 = self.last * h
+        span = self.last - self.first
+
+        if thumb_y1 <= event.y <= thumb_y2:
+            self._drag_offset = event.y - thumb_y1
+        else:
+            self._drag_offset = (span * h) / 2.0
+            if self.command:
+                new_first = max(0.0, min(1.0 - span, (event.y - self._drag_offset) / h))
+                self.command("moveto", new_first)
+
+        self._dragging = True
+        self._redraw()
+
+    def _on_drag(self, event):
+        if self._dragging and self.command:
+            h = max(1, self.winfo_height())
+            span = self.last - self.first
+            new_first = max(0.0, min(1.0 - span, (event.y - self._drag_offset) / h))
+            self.command("moveto", new_first)
+
+    def _on_release(self, _event):
+        self._dragging = False
+        self._redraw()
+
+
 class ChessScreenApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Chess.com HTML Live Tracker + Rodent IV")
-        self.root.geometry("1040x760")
+        self.root.geometry("1060x760")
         self.root.minsize(920, 680)
         self.root.resizable(True, True)
         self.root.configure(bg="#000000")
@@ -342,16 +443,24 @@ class ChessScreenApp:
         self.last_dom_payload = None
         self.http_server = None
 
+        # Real match history tracking
         self.known_san_sequence = []
-        self.history_info = (0, 0)
+        self.match_moves = []          # Full list of real chess.Move objects in the match
+        self.last_html_ply = 0         # Ply currently active on Chess.com
+        self.last_html_board_fen = self.board.board_fen()
+        self.view_ply = 0              # Ply currently viewed in this app
+        self.manual_history_nav = False
 
+        # Sandbox ("Try Move") state
         self.sandbox_mode = False
-        self.live_board_backup = None
+        self.sandbox_base_ply = 0      # Real match ply from which sandbox branched off
+        self.sandbox_moves = []        # Hypothetical moves made on top of sandbox_base_ply
         self.selected_square = None
         self.legal_targets_for_selected = set()
 
         # Arrows for Top 3 recommended moves: list of (rank_int, chess.Move)
         self.top3_arrows = []
+        self.preview_canvases = []
 
         self.engine = None
         self.engine_path = self._auto_find_rodent()
@@ -365,14 +474,22 @@ class ChessScreenApp:
         self.show_top3_var = tk.BooleanVar(value=False)
         self.elo_var = tk.IntVar(value=1500)
 
-        self.board_size = 440
+        self.board_size = 560
+        self.controls_layout_mode = None
+        self.top_bar_height_est = 66
+        self.side_bar_width = 216
 
         self._build_ui()
         self._draw_board()
         self._draw_eval_bar()
         self._update_pgn_display()
+        self._update_nav_buttons()
         self._update_elo_labels()
         self._start_html_bridge_server()
+
+        # Keyboard shortcuts for Backwards / Forwards
+        self.root.bind("<Left>", self._on_left_key)
+        self.root.bind("<Right>", self._on_right_key)
 
         if self.engine_path:
             self.engine_status_lbl.config(
@@ -555,9 +672,12 @@ class ChessScreenApp:
         return sq_set
 
     def _reconstruct_board_from_payload(self, payload, reference_board):
+        """
+        Returns (reconstructed_board, (active_ply, total_plies), full_match_moves_list)
+        """
         pieces_data = payload.get("pieces", [])
         if not pieces_data:
-            return None, (0, 0)
+            return None, (0, 0), []
 
         raw_moves = payload.get("moves", [])
         highlights = payload.get("highlights", [])
@@ -598,10 +718,11 @@ class ChessScreenApp:
             self.known_san_sequence = valid_sans
 
         total_plies = len(states) - 1
+        full_match_moves = list(states[-1].move_stack) if total_plies > 0 else []
 
         if isinstance(selected_ply, int) and 0 <= selected_ply <= total_plies:
             if states[selected_ply].board_fen() == target_board_fen:
-                return states[selected_ply].copy(stack=True), (selected_ply, total_plies)
+                return states[selected_ply].copy(stack=True), (selected_ply, total_plies), full_match_moves
 
         matching_indices = [
             i for i, st in enumerate(states) if st.board_fen() == target_board_fen
@@ -609,7 +730,7 @@ class ChessScreenApp:
 
         if len(matching_indices) == 1:
             idx = matching_indices[0]
-            return states[idx].copy(stack=True), (idx, total_plies)
+            return states[idx].copy(stack=True), (idx, total_plies), full_match_moves
 
         if len(matching_indices) > 1:
             if hl_squares:
@@ -623,32 +744,32 @@ class ChessScreenApp:
                             hl_matches.append(idx)
                 if len(hl_matches) == 1:
                     idx = hl_matches[0]
-                    return states[idx].copy(stack=True), (idx, total_plies)
+                    return states[idx].copy(stack=True), (idx, total_plies), full_match_moves
                 if hl_matches:
                     matching_indices = hl_matches
 
             cur_ply = len(reference_board.move_stack) if reference_board is not None else total_plies
             best_idx = min(matching_indices, key=lambda i: abs(i - cur_ply))
-            return states[best_idx].copy(stack=True), (best_idx, total_plies)
+            return states[best_idx].copy(stack=True), (best_idx, total_plies), full_match_moves
 
         if reference_board is not None:
             if reference_board.board_fen() == target_board_fen:
                 ply_now = len(reference_board.move_stack)
-                return reference_board.copy(stack=True), (ply_now, max(ply_now, total_plies))
+                return reference_board.copy(stack=True), (ply_now, max(ply_now, total_plies)), list(reference_board.move_stack)
 
             temp_back = reference_board.copy(stack=True)
             while len(temp_back.move_stack) > 0:
                 temp_back.pop()
                 if temp_back.board_fen() == target_board_fen:
                     ply_now = len(temp_back.move_stack)
-                    return temp_back, (ply_now, max(ply_now, total_plies))
+                    return temp_back, (ply_now, max(ply_now, total_plies)), list(reference_board.move_stack)
 
             for mv in reference_board.legal_moves:
                 b_next = reference_board.copy(stack=True)
                 b_next.push(mv)
                 if b_next.board_fen() == target_board_fen:
                     ply_now = len(b_next.move_stack)
-                    return b_next, (ply_now, max(ply_now, total_plies))
+                    return b_next, (ply_now, max(ply_now, total_plies)), list(b_next.move_stack)
 
         self.known_san_sequence = []
         last_moved_color = None
@@ -663,14 +784,19 @@ class ChessScreenApp:
         else:
             dom_board.turn = chess.WHITE
 
-        return dom_board, (0, 0)
+        return dom_board, (0, 0), []
 
     def _format_sync_status_text(self):
         turn_str = "White" if self.board.turn == chess.WHITE else "Black"
-        cur_ply, total_plies = self.history_info
-        if total_plies > 0 and cur_ply < total_plies:
+        total_plies = len(self.match_moves)
+        if self.sandbox_mode:
             return (
-                f"⏪ Match history: move {cur_ply}/{total_plies} ({turn_str} to move)",
+                f"🧪 TEST MODE (+{len(self.sandbox_moves)} move(s) from move {self.sandbox_base_ply}/{total_plies}, {turn_str} to move)",
+                "#60a5fa"
+            )
+        if total_plies > 0 and self.view_ply < total_plies:
+            return (
+                f"⏪ History view: move {self.view_ply}/{total_plies} ({turn_str} to move)",
                 "#38bdf8"
             )
         return (
@@ -684,31 +810,57 @@ class ChessScreenApp:
             self.browser_connected = True
             self.conn_badge.config(text="● HTML Connected", fg="#00ff66")
 
-        if self.sandbox_mode:
-            updated_backup, hist = self._reconstruct_board_from_payload(
-                payload, self.live_board_backup or self.board
-            )
-            if updated_backup is not None:
-                self.live_board_backup = updated_backup
-                self.history_info = hist
-            return
-
-        reconstructed, hist = self._reconstruct_board_from_payload(payload, self.board)
+        reconstructed, hist, full_match_moves = self._reconstruct_board_from_payload(payload, self.board)
         if reconstructed is None:
             return
 
-        self.flipped = bool(payload.get("flipped", False))
-        self.history_info = hist
-        board_changed = (
-            self._board_state_signature(reconstructed) != self._board_state_signature(self.board)
+        html_ply, _ = hist
+        prev_sig = (
+            [m.uci() for m in self.match_moves],
+            self.last_html_ply,
+            self.last_html_board_fen,
         )
-        self.board = reconstructed
+        new_sig = (
+            [m.uci() for m in full_match_moves],
+            html_ply,
+            reconstructed.board_fen(),
+        )
+        html_changed = (new_sig != prev_sig)
+
+        self.match_moves = full_match_moves
+        self.last_html_ply = html_ply
+        self.last_html_board_fen = reconstructed.board_fen()
+        self.flipped = bool(payload.get("flipped", False))
+
+        if self.sandbox_mode:
+            self._update_nav_buttons()
+            return
+
+        if self.manual_history_nav and not html_changed and not force_analysis:
+            self._update_nav_buttons()
+            return
+
+        self.manual_history_nav = False
+        self.view_ply = html_ply
+
+        if full_match_moves:
+            target_board = chess.Board()
+            for mv in full_match_moves[:html_ply]:
+                target_board.push(mv)
+        else:
+            target_board = reconstructed
+
+        board_changed = (
+            self._board_state_signature(target_board) != self._board_state_signature(self.board)
+        )
+        self.board = target_board
 
         if board_changed:
             self.top3_arrows = []
 
         self._draw_board()
         self._update_pgn_display()
+        self._update_nav_buttons()
 
         status_txt, status_col = self._format_sync_status_text()
         self.status_label.config(text=status_txt, fg=status_col)
@@ -942,18 +1094,16 @@ class ChessScreenApp:
         right_frame.pack(side=tk.RIGHT, fill="y", padx=(12, 0))
         right_frame.pack_propagate(False)
 
-        left_frame = tk.Frame(main_container, bg="#000000")
-        left_frame.pack(side=tk.LEFT, fill="both", expand=True)
+        self.left_frame = tk.Frame(main_container, bg="#000000")
+        self.left_frame.pack(side=tk.LEFT, fill="both", expand=True)
+        self.left_frame.bind("<Configure>", self._on_left_frame_resize)
 
-        # ================= LEFT SIDE =================
-        top_frame = tk.Frame(left_frame, bg="#000000")
-        top_frame.pack(side=tk.TOP, fill="x", pady=(0, 4))
-
-        controls_inner = tk.Frame(top_frame, bg="#000000")
-        controls_inner.pack(anchor="center")
+        # ================= ADAPTIVE CONTROLS BAR (TOP OR LEFT SIDE COLUMN) =================
+        self.controls_frame = tk.Frame(self.left_frame, bg="#000000")
+        self.controls_inner = tk.Frame(self.controls_frame, bg="#000000")
 
         self.connect_btn = tk.Button(
-            controls_inner,
+            self.controls_inner,
             text="🌐 Connect Browser (HTML)",
             command=self._show_browser_connect_dialog,
             bg="#2563eb",
@@ -966,10 +1116,9 @@ class ChessScreenApp:
             pady=5,
             cursor="hand2"
         )
-        self.connect_btn.pack(side=tk.LEFT, padx=4)
 
         self.flip_btn = tk.Button(
-            controls_inner,
+            self.controls_inner,
             text="⇅ Flip Board",
             command=self._toggle_flip,
             bg="#1a1a1a",
@@ -982,10 +1131,9 @@ class ChessScreenApp:
             pady=5,
             cursor="hand2"
         )
-        self.flip_btn.pack(side=tk.LEFT, padx=4)
 
         self.reset_btn = tk.Button(
-            controls_inner,
+            self.controls_inner,
             text="↺ Reset",
             command=self._reset_game,
             bg="#1a1a1a",
@@ -998,56 +1146,24 @@ class ChessScreenApp:
             pady=5,
             cursor="hand2"
         )
-        self.reset_btn.pack(side=tk.LEFT, padx=4)
 
         self.conn_badge = tk.Label(
-            controls_inner,
+            self.controls_inner,
             text="● Waiting for HTML",
             bg="#000000",
             fg="#fbbf24",
             font=("Consolas", 9, "bold")
         )
-        self.conn_badge.pack(side=tk.LEFT, padx=6)
 
         self.status_label = tk.Label(
-            left_frame,
+            self.controls_frame,
             text="Click '🌐 Connect Browser (HTML)' to link Chrome or Firefox",
             bg="#000000",
             fg="#888888",
             font=("Consolas", 9)
         )
-        self.status_label.pack(side=tk.TOP, fill="x", pady=(2, 4))
 
-        pgn_container = tk.Frame(left_frame, bg="#000000")
-        pgn_container.pack(side=tk.BOTTOM, fill="x", padx=12, pady=(4, 2))
-
-        pgn_label = tk.Label(
-            pgn_container,
-            text="PGN NOTATION:",
-            bg="#000000",
-            fg="#aaaaaa",
-            font=("Consolas", 9, "bold"),
-            anchor="w"
-        )
-        pgn_label.pack(fill="x", pady=(0, 2))
-
-        self.pgn_text = tk.Text(
-            pgn_container,
-            height=5,
-            bg="#0d0d0d",
-            fg="#00ff66",
-            insertbackground="#ffffff",
-            relief="flat",
-            font=("Consolas", 10),
-            wrap="word",
-            padx=8,
-            pady=6
-        )
-        self.pgn_text.pack(fill="x")
-
-        self.board_stage_frame = tk.Frame(left_frame, bg="#000000")
-        self.board_stage_frame.pack(side=tk.TOP, fill="both", expand=True)
-        self.board_stage_frame.bind("<Configure>", self._on_board_stage_resize)
+        self.board_stage_frame = tk.Frame(self.left_frame, bg="#000000")
 
         self.board_row_frame = tk.Frame(self.board_stage_frame, bg="#000000")
         self.board_row_frame.place(relx=0.5, rely=0.5, anchor="center")
@@ -1074,7 +1190,10 @@ class ChessScreenApp:
             highlightbackground="#333333"
         )
 
-        # ================= RIGHT SIDE (RODENT IV ENGINE) =================
+        # Start in horizontal top mode; auto-switches to side column if space permits
+        self._apply_controls_layout("top")
+
+        # ================= RIGHT SIDE (RODENT IV ENGINE + NAV + PGN) =================
         tk.Label(
             right_frame,
             text="RODENT IV ENGINE",
@@ -1245,41 +1364,63 @@ class ChessScreenApp:
         self.top3_text.pack(fill="x", pady=(0, 6))
         self._set_top3_message("Check box to calculate & show board arrows.", "info_text")
 
+        # ================= COMPACT HISTORY NAVIGATION & MOVE VERDICT BOX =================
         sandbox_box = tk.Frame(
             right_frame,
             bg="#121212",
             highlightthickness=1,
             highlightbackground="#2e3b4e"
         )
-        sandbox_box.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        sandbox_box.pack(fill="x", padx=12, pady=(0, 8))
 
-        sb_btn_row = tk.Frame(sandbox_box, bg="#121212")
-        sb_btn_row.pack(fill="x", padx=8, pady=(8, 4))
+        nav_btn_row = tk.Frame(sandbox_box, bg="#121212")
+        nav_btn_row.pack(fill="x", padx=8, pady=(8, 4))
 
-        self.try_move_btn = tk.Button(
-            sb_btn_row,
-            text="🧪 Try Move",
-            command=self._enter_sandbox_mode,
-            bg="#2563eb",
+        self.back_btn = tk.Button(
+            nav_btn_row,
+            text="◀ Backwards",
+            command=self._step_backwards,
+            bg="#1f2937",
             fg="#ffffff",
-            activebackground="#1d4ed8",
+            activebackground="#374151",
             activeforeground="#ffffff",
+            disabledforeground="#6b7280",
             relief="flat",
             font=("Consolas", 8, "bold"),
             padx=6,
-            pady=4,
-            cursor="hand2"
+            pady=5,
+            cursor="hand2",
+            state="disabled"
         )
-        self.try_move_btn.pack(side=tk.LEFT, expand=True, fill="x", padx=(0, 3))
+        self.back_btn.pack(side=tk.LEFT, expand=True, fill="x", padx=(0, 3))
+
+        self.forward_btn = tk.Button(
+            nav_btn_row,
+            text="Forwards ▶",
+            command=self._step_forwards,
+            bg="#1f2937",
+            fg="#ffffff",
+            activebackground="#374151",
+            activeforeground="#ffffff",
+            disabledforeground="#6b7280",
+            relief="flat",
+            font=("Consolas", 8, "bold"),
+            padx=6,
+            pady=5,
+            cursor="hand2",
+            state="disabled"
+        )
+        self.forward_btn.pack(side=tk.LEFT, expand=True, fill="x", padx=(3, 0))
 
         self.exit_try_btn = tk.Button(
-            sb_btn_row,
-            text="↩ Back to Match",
+            sandbox_box,
+            text="↩ Back to Live Match",
             command=self._exit_sandbox_mode,
             bg="#374151",
             fg="#ffffff",
             activebackground="#4b5563",
             activeforeground="#ffffff",
+            disabledforeground="#6b7280",
             relief="flat",
             font=("Consolas", 8, "bold"),
             padx=6,
@@ -1287,52 +1428,212 @@ class ChessScreenApp:
             cursor="hand2",
             state="disabled"
         )
-        self.exit_try_btn.pack(side=tk.LEFT, expand=True, fill="x", padx=(3, 0))
+        self.exit_try_btn.pack(fill="x", padx=8, pady=(0, 6))
 
         self.move_verdict_lbl = tk.Label(
             sandbox_box,
-            text="Click any piece on the board\nto test a move.",
+            text="Click any piece on the board to test a move,\nor use Backwards / Forwards to review history.",
             bg="#121212",
             fg="#9ca3af",
             font=("Consolas", 9),
             justify="left",
             anchor="nw",
-            wraplength=385
+            wraplength=385,
+            height=3
         )
-        self.move_verdict_lbl.pack(fill="both", expand=True, padx=8, pady=(2, 6))
+        self.move_verdict_lbl.pack(fill="x", padx=8, pady=(2, 8))
+
+        # ================= PGN NOTATION BOX (DARK AUTO-HIDING SCROLLBAR) =================
+        pgn_box = tk.Frame(
+            right_frame,
+            bg="#121212",
+            highlightthickness=1,
+            highlightbackground="#262626"
+        )
+        pgn_box.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+        pgn_header = tk.Label(
+            pgn_box,
+            text="PGN NOTATION:",
+            bg="#18181b",
+            fg="#9ca3af",
+            font=("Consolas", 8, "bold"),
+            anchor="w",
+            padx=8,
+            pady=3
+        )
+        pgn_header.pack(fill="x")
+
+        pgn_body = tk.Frame(pgn_box, bg="#0d0d0d")
+        pgn_body.pack(fill="both", expand=True, padx=6, pady=6)
+        pgn_body.rowconfigure(0, weight=1)
+        pgn_body.columnconfigure(0, weight=1)
+
+        self.pgn_text = tk.Text(
+            pgn_body,
+            height=4,
+            bg="#0d0d0d",
+            fg="#00ff66",
+            insertbackground="#ffffff",
+            relief="flat",
+            highlightthickness=0,
+            font=("Consolas", 8),
+            wrap="word",
+            padx=4,
+            pady=4,
+        )
+        self.pgn_text.grid(row=0, column=0, sticky="nsew")
+
+        self.pgn_scroll = DarkAutoScrollbar(
+            pgn_body,
+            command=self.pgn_text.yview,
+            width=7,
+            bg="#0d0d0d",
+            thumb_color="#2a2a2e",
+            hover_color="#4b5563",
+        )
+        self.pgn_scroll.grid(row=0, column=1, sticky="ns", padx=(2, 0))
+        self.pgn_scroll.grid_remove()
+
+        self.pgn_text.config(yscrollcommand=self.pgn_scroll.set)
+
+    def _clear_preview_canvases(self):
+        for cv in self.preview_canvases:
+            try:
+                cv.destroy()
+            except Exception:
+                pass
+        self.preview_canvases = []
 
     def _set_top3_message(self, msg, tag="info_text"):
         self.top3_text.config(state="normal")
+        self._clear_preview_canvases()
         self.top3_text.delete("1.0", tk.END)
         self.top3_text.insert(tk.END, msg, tag)
         self.top3_text.config(state="disabled")
 
     def _set_top3_lines(self, lines):
         self.top3_text.config(state="normal")
+        self._clear_preview_canvases()
         self.top3_text.delete("1.0", tk.END)
-        thickness_labels = {1: "━━", 2: "──", 3: "┄┄"}
+
+        mini_styles = {
+            1: (ARROW_COLORS[1], 4.2, (7, 8, 4)),
+            2: (ARROW_COLORS[2], 2.4, (6, 7, 3)),
+            3: (ARROW_COLORS[3], 1.1, (5, 6, 2)),
+        }
+
         for idx, (r, san, sc, ln, _, _) in enumerate(lines):
             if idx > 0:
                 self.top3_text.insert(tk.END, "\n")
-            arrow_sym = thickness_labels.get(r, "--")
-            self.top3_text.insert(tk.END, f"{r}. [{arrow_sym}] ", f"rank{r}")
-            self.top3_text.insert(tk.END, f"{san} [{sc}] -> {ln}", "move_text")
+            self.top3_text.insert(tk.END, f"{r}. ", f"rank{r}")
+
+            color, width, arrowshape = mini_styles.get(r, ("#ffffff", 2.0, (6, 7, 3)))
+            mini_cv = tk.Canvas(
+                self.top3_text,
+                width=32,
+                height=13,
+                bg="#121212",
+                highlightthickness=0,
+                bd=0
+            )
+            mini_cv.create_line(
+                2, 7, 30, 7,
+                fill=color,
+                width=width,
+                arrow=tk.LAST,
+                arrowshape=arrowshape,
+                capstyle=tk.ROUND
+            )
+            self.preview_canvases.append(mini_cv)
+            self.top3_text.window_create(tk.END, window=mini_cv, align="center")
+
+            self.top3_text.insert(tk.END, f" {san} [{sc}] -> {ln}", "move_text")
+
         self.top3_text.config(state="disabled")
 
-    # ================= DYNAMIC BOARD RESIZING =================
-    def _recalculate_board_size(self, stage_w=None, stage_h=None):
-        if stage_w is None:
-            stage_w = self.board_stage_frame.winfo_width()
-        if stage_h is None:
-            stage_h = self.board_stage_frame.winfo_height()
+    # ================= ADAPTIVE CONTROLS LAYOUT & BOARD RESIZING =================
+    def _apply_controls_layout(self, mode):
+        if self.controls_layout_mode == mode:
+            return
+        self.controls_layout_mode = mode
 
-        if stage_w <= 1 or stage_h <= 1:
+        self.board_stage_frame.pack_forget()
+        self.controls_frame.pack_forget()
+        for w in (self.connect_btn, self.flip_btn, self.reset_btn, self.conn_badge, self.status_label, self.controls_inner):
+            w.pack_forget()
+
+        if mode == "side":
+            panel_bg = "#0a0a0a"
+            col_w = self.side_bar_width - 12  # 204px inner width + 12px right margin
+            self.controls_frame.config(
+                bg=panel_bg,
+                width=col_w,
+                highlightthickness=1,
+                highlightbackground="#262626"
+            )
+            self.controls_frame.pack_propagate(False)
+            self.controls_inner.config(bg=panel_bg)
+            self.conn_badge.config(bg=panel_bg)
+            self.status_label.config(bg=panel_bg, wraplength=col_w - 20, justify="center")
+
+            self.controls_inner.pack(side=tk.TOP, fill="x", padx=10, pady=(12, 6))
+            self.connect_btn.pack(side=tk.TOP, fill="x", pady=(0, 6))
+            self.flip_btn.pack(side=tk.TOP, fill="x", pady=(0, 6))
+            self.reset_btn.pack(side=tk.TOP, fill="x", pady=(0, 8))
+            self.conn_badge.pack(side=tk.TOP, anchor="center", pady=(2, 2))
+            self.status_label.pack(side=tk.TOP, fill="x", padx=10, pady=(4, 12))
+
+            self.controls_frame.pack(side=tk.LEFT, fill="y", padx=(0, 12))
+            self.board_stage_frame.pack(side=tk.LEFT, fill="both", expand=True)
+        else:
+            self.controls_frame.config(
+                bg="#000000",
+                width=0,
+                highlightthickness=0
+            )
+            self.controls_frame.pack_propagate(True)
+            self.controls_inner.config(bg="#000000")
+            self.conn_badge.config(bg="#000000")
+            self.status_label.config(bg="#000000", wraplength=0, justify="center")
+
+            self.controls_inner.pack(side=tk.TOP, anchor="center")
+            self.connect_btn.pack(side=tk.LEFT, padx=4)
+            self.flip_btn.pack(side=tk.LEFT, padx=4)
+            self.reset_btn.pack(side=tk.LEFT, padx=4)
+            self.conn_badge.pack(side=tk.LEFT, padx=6)
+            self.status_label.pack(side=tk.TOP, fill="x", pady=(4, 0))
+
+            self.controls_frame.pack(side=tk.TOP, fill="x", pady=(0, 4))
+            self.board_stage_frame.pack(side=tk.TOP, fill="both", expand=True)
+            self.controls_frame.update_idletasks()
+            req_h = self.controls_frame.winfo_reqheight()
+            if req_h > 20:
+                self.top_bar_height_est = req_h + 4
+
+    def _recalculate_layout_and_board(self, left_w=None, left_h=None):
+        if left_w is None:
+            left_w = self.left_frame.winfo_width()
+        if left_h is None:
+            left_h = self.left_frame.winfo_height()
+
+        if left_w <= 1 or left_h <= 1:
             return
 
         eval_space = (self.eval_bar_width + 10) if self.show_eval_var.get() else 0
-        avail_w = stage_w - eval_space - 12
-        avail_h = stage_h - 12
-        new_size = max(260, min(avail_w, avail_h))
+        margin = 12
+
+        size_top = max(260, min(left_w - eval_space - margin, left_h - self.top_bar_height_est - margin))
+        size_side = max(260, min(left_w - self.side_bar_width - eval_space - margin, left_h - margin))
+
+        # Switch to side column only when doing so genuinely makes the board larger
+        if self.controls_layout_mode == "side":
+            desired_mode = "side" if size_side >= size_top + 2 else "top"
+        else:
+            desired_mode = "side" if size_side >= size_top + 10 else "top"
+
+        self._apply_controls_layout(desired_mode)
+        new_size = size_side if desired_mode == "side" else size_top
 
         if abs(new_size - self.board_size) >= 2:
             self.board_size = new_size
@@ -1342,55 +1643,139 @@ class ChessScreenApp:
             if self.show_eval_var.get():
                 self._draw_eval_bar()
 
-    def _on_board_stage_resize(self, event):
-        self._recalculate_board_size(event.width, event.height)
+    def _on_left_frame_resize(self, event):
+        if event.widget is self.left_frame:
+            self._recalculate_layout_and_board(event.width, event.height)
 
-    # ================= "TRY A MOVE" SANDBOX LOGIC =================
-    def _enter_sandbox_mode(self):
-        if not self.sandbox_mode:
-            self.sandbox_mode = True
-            self.live_board_backup = self.board.copy(stack=True)
-            self.exit_try_btn.config(state="normal", bg="#dc2626")
-            self.try_move_btn.config(text="🧪 Test Mode Active", bg="#1e40af")
-            self.status_label.config(
-                text="🧪 TEST MODE: Move a piece on the board (HTML sync paused)",
-                fg="#60a5fa"
-            )
-            self.move_verdict_lbl.config(
-                text="Select a piece on the board,\nthen click a destination square.",
-                fg="#60a5fa"
-            )
+    # ================= HISTORY NAVIGATION & SANDBOX LOGIC =================
+    def _on_left_key(self, event):
+        if isinstance(event.widget, (tk.Entry, tk.Text)):
+            return
+        self._step_backwards()
 
-    def _exit_sandbox_mode(self):
+    def _on_right_key(self, event):
+        if isinstance(event.widget, (tk.Entry, tk.Text)):
+            return
+        self._step_forwards()
+
+    def _update_nav_buttons(self):
+        can_back = (
+            (self.sandbox_mode and len(self.sandbox_moves) > 0)
+            or (not self.sandbox_mode and self.view_ply > 0 and len(self.match_moves) > 0)
+        )
+        can_forward = (not self.sandbox_mode) and (self.view_ply < len(self.match_moves))
+        can_return_live = self.sandbox_mode or self.manual_history_nav
+
+        self.back_btn.config(
+            state="normal" if can_back else "disabled",
+            bg="#2563eb" if can_back else "#1f2937"
+        )
+        self.forward_btn.config(
+            state="normal" if can_forward else "disabled",
+            bg="#2563eb" if can_forward else "#1f2937"
+        )
+        self.exit_try_btn.config(
+            state="normal" if can_return_live else "disabled",
+            bg="#dc2626" if can_return_live else "#374151"
+        )
+
+    def _rebuild_and_evaluate_current_view(self):
+        b = chess.Board()
+        base_limit = self.sandbox_base_ply if self.sandbox_mode else self.view_ply
+        for mv in self.match_moves[:base_limit]:
+            b.push(mv)
         if self.sandbox_mode:
-            self.analysis_generation += 1
-            self.is_analyzing = False
+            for mv in self.sandbox_moves:
+                b.push(mv)
 
-            self.sandbox_mode = False
-            self.selected_square = None
-            self.legal_targets_for_selected = set()
-            self.top3_arrows = []
+        self.board = b
+        self.selected_square = None
+        self.legal_targets_for_selected = set()
+        self.top3_arrows = []
 
-            if self.live_board_backup is not None:
-                self.board = self.live_board_backup.copy(stack=True)
-                self.live_board_backup = None
+        self._draw_board()
+        self._update_pgn_display()
+        self._update_nav_buttons()
 
-            self.exit_try_btn.config(state="disabled", bg="#374151")
-            self.try_move_btn.config(text="🧪 Try Move", bg="#2563eb")
+        status_txt, status_col = self._format_sync_status_text()
+        self.status_label.config(text=status_txt, fg=status_col)
+        self._request_engine_analysis()
+
+    def _step_backwards(self):
+        if self.sandbox_mode and len(self.sandbox_moves) > 0:
+            self.sandbox_moves.pop()
+            if len(self.sandbox_moves) == 0:
+                self.sandbox_mode = False
+                self.view_ply = self.sandbox_base_ply
+                self.manual_history_nav = (self.view_ply != self.last_html_ply)
+                self.move_verdict_lbl.config(
+                    text="Unplayed test move discarded.\nReturned to match history.",
+                    fg="#9ca3af"
+                )
+            else:
+                self.move_verdict_lbl.config(
+                    text=f"Test move discarded ({len(self.sandbox_moves)} test move(s) active).\nForwards disabled for unplayed moves.",
+                    fg="#60a5fa"
+                )
+            self._rebuild_and_evaluate_current_view()
+            return
+
+        if not self.sandbox_mode and self.view_ply > 0 and len(self.match_moves) > 0:
+            self.view_ply -= 1
+            self.manual_history_nav = (self.view_ply != self.last_html_ply)
             self.move_verdict_lbl.config(
-                text="Returned to live match.\nClick any piece to test a move.",
+                text=f"Match history: move {self.view_ply}/{len(self.match_moves)}.\nClick any piece on the board to test an alternative.",
                 fg="#9ca3af"
             )
+            self._rebuild_and_evaluate_current_view()
 
-            self._draw_board()
-            self._update_pgn_display()
-            status_txt, status_col = self._format_sync_status_text()
-            self.status_label.config(text=status_txt, fg=status_col)
+    def _step_forwards(self):
+        if self.sandbox_mode:
+            return
+        if self.view_ply < len(self.match_moves):
+            self.view_ply += 1
+            self.manual_history_nav = (self.view_ply != self.last_html_ply)
+            self.move_verdict_lbl.config(
+                text=f"Match history: move {self.view_ply}/{len(self.match_moves)}.\nClick any piece on the board to test an alternative.",
+                fg="#9ca3af"
+            )
+            self._rebuild_and_evaluate_current_view()
 
-            if self.last_dom_payload:
-                self._on_html_board_update(self.last_dom_payload, force_analysis=True)
-            else:
-                self._request_engine_analysis()
+    def _exit_sandbox_mode(self):
+        self.analysis_generation += 1
+        self.is_analyzing = False
+
+        self.sandbox_mode = False
+        self.sandbox_moves = []
+        self.manual_history_nav = False
+        self.selected_square = None
+        self.legal_targets_for_selected = set()
+        self.top3_arrows = []
+
+        self.view_ply = self.last_html_ply
+        if self.match_moves:
+            b = chess.Board()
+            for mv in self.match_moves[:self.view_ply]:
+                b.push(mv)
+            self.board = b
+        else:
+            self.board = chess.Board()
+
+        self.move_verdict_lbl.config(
+            text="Returned to live match.\nClick any piece to test a move.",
+            fg="#9ca3af"
+        )
+
+        self._draw_board()
+        self._update_pgn_display()
+        self._update_nav_buttons()
+        status_txt, status_col = self._format_sync_status_text()
+        self.status_label.config(text=status_txt, fg=status_col)
+
+        if self.last_dom_payload:
+            self._on_html_board_update(self.last_dom_payload, force_analysis=True)
+        else:
+            self._request_engine_analysis()
 
     def _on_board_click(self, event):
         sq_dim = self.board_size / 8.0
@@ -1403,9 +1788,6 @@ class ChessScreenApp:
         rank_idx = row if self.flipped else 7 - row
         clicked_sq = chess.square(file_idx, rank_idx)
 
-        if not self.sandbox_mode:
-            self._enter_sandbox_mode()
-
         if self.selected_square is not None and clicked_sq in self.legal_targets_for_selected:
             move = chess.Move(self.selected_square, clicked_sq)
             piece = self.board.piece_at(self.selected_square)
@@ -1413,9 +1795,15 @@ class ChessScreenApp:
                 move = chess.Move(self.selected_square, clicked_sq, promotion=chess.QUEEN)
 
             if move in self.board.legal_moves:
+                if not self.sandbox_mode:
+                    self.sandbox_mode = True
+                    self.sandbox_base_ply = self.view_ply
+                    self.sandbox_moves = []
+
                 board_before = self.board.copy(stack=False)
                 san_move = board_before.san(move)
                 self.board.push(move)
+                self.sandbox_moves.append(move)
                 board_after = self.board.copy(stack=False)
 
                 self.selected_square = None
@@ -1423,6 +1811,11 @@ class ChessScreenApp:
                 self.top3_arrows = []
                 self._draw_board()
                 self._update_pgn_display()
+                self._update_nav_buttons()
+
+                status_txt, status_col = self._format_sync_status_text()
+                self.status_label.config(text=status_txt, fg=status_col)
+
                 self._evaluate_tried_move(board_before, board_after, move, san_move)
                 return
 
@@ -1576,10 +1969,6 @@ class ChessScreenApp:
     def _compute_top3_distinct_locked(
         self, board_obj, gen, t_start, primary_t, refine_t, screen_t, max_cand, max_depth
     ):
-        """
-        Returns (results_list, max_depth_reached) where each entry in results_list is:
-        (rank_int, san_str, eval_str, line_str, eval_cp, chess.Move)
-        """
         legal_moves = list(board_obj.legal_moves)
         if not legal_moves:
             return [], 0
@@ -1678,12 +2067,12 @@ class ChessScreenApp:
                 self.show_eval_var.set(False)
                 return
             self.eval_canvas.pack(side=tk.LEFT, padx=(8, 0))
-            self._recalculate_board_size()
+            self._recalculate_layout_and_board()
             self._draw_eval_bar()
             self._request_engine_analysis()
         else:
             self.eval_canvas.pack_forget()
-            self._recalculate_board_size()
+            self._recalculate_layout_and_board()
             self.eval_detail_lbl.config(text="Evaluation: disabled", fg="#777777")
 
     def _on_toggle_top3(self):
@@ -1911,18 +2300,22 @@ class ChessScreenApp:
         self.analysis_generation += 1
         self.is_analyzing = False
         self.sandbox_mode = False
-        self.live_board_backup = None
+        self.sandbox_moves = []
+        self.sandbox_base_ply = 0
+        self.manual_history_nav = False
         self.selected_square = None
         self.legal_targets_for_selected = set()
         self.top3_arrows = []
         self.known_san_sequence = []
-        self.history_info = (0, 0)
-        self.exit_try_btn.config(state="disabled", bg="#374151")
-        self.try_move_btn.config(text="🧪 Try Move", bg="#2563eb")
+        self.match_moves = []
+        self.last_html_ply = 0
+        self.view_ply = 0
 
         self.board = chess.Board()
+        self.last_html_board_fen = self.board.board_fen()
         self._draw_board()
         self._update_pgn_display()
+        self._update_nav_buttons()
         self._request_engine_analysis()
 
     def _square_to_canvas_center(self, square):
@@ -1939,7 +2332,6 @@ class ChessScreenApp:
 
         sq = self.board_size / 8.0
 
-        # Thickness settings: Rank 1 = thickest, Rank 2 = normal, Rank 3 = thin
         style_map = {
             1: (
                 ARROW_COLORS[1],
@@ -1958,7 +2350,6 @@ class ChessScreenApp:
             ),
         }
 
-        # Draw Rank 3 -> Rank 2 -> Rank 1 so #1 is always cleanly visible on top
         for rank_num, move in sorted(self.top3_arrows, key=lambda item: item[0], reverse=True):
             if rank_num not in style_map:
                 continue
@@ -2073,7 +2464,6 @@ class ChessScreenApp:
                         fill=fg_color
                     )
 
-        # Draw Top 3 recommendation arrows on top
         self._draw_move_arrows()
 
     def _update_pgn_display(self):
@@ -2089,6 +2479,7 @@ class ChessScreenApp:
         self.pgn_text.insert(tk.END, pgn_str)
         self.pgn_text.see(tk.END)
         self.pgn_text.config(state="disabled")
+        self.root.after_idle(lambda: self.pgn_scroll.set(*self.pgn_text.yview()))
 
     def _on_close(self):
         self.analysis_generation += 1
