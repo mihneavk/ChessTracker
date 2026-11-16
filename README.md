@@ -7,19 +7,19 @@ A real-time desktop chess companion and analysis board for **Chess.com**. Instea
 ## ✨ Features
 
 - **100% Accurate HTML Sync:** Reads pieces, board orientation, highlights, and move lists directly from Chess.com in real time (Chrome, Edge, and Firefox supported).
-- **Full History Navigation:** Step backward or forward through previous moves on Chess.com—the tracker automatically detects which ply you are viewing and updates turn rights and evaluations accordingly.
-- **Dual Top-3 Move Suggestions:** Displays the **Top 3 distinct best moves for both White and Black** after every move, capped at a strict **5-second** total calculation window.
+- **Top-3 Move Suggestions + Board Arrows:** Displays the **Top 3 distinct best moves** for the active side to move along with color-coded arrows directly on the board (**Gold** #1, **Sky Blue** #2, **Purple** #3), strictly capped at a **5-second** total calculation window.
+- **Built-in History Navigation:** Step backward or forward through match moves using the **`◀ Backwards` / `Forwards ▶`** buttons, your keyboard's **Left / Right arrow keys**, or directly inside Chess.com's move list.
 - **Live Position Evaluation Bar:** Dynamic centipawn/mate evaluation bar synced to the active position.
 - **Adjustable Engine Strength:** Scale Rodent IV's playing strength from **800 Elo** up to **MAX (~2975 Elo)**.
-- **"Try Move" Sandbox Mode:** Pause live sync at any moment to test hypothetical moves directly on the board and get instant move classifications (*Best Move, Excellent, Good, Inaccuracy, Mistake, Blunder*), then return to the live match with one click.
-- **Responsive Resizable UI:** Resize or maximize the window freely—the chessboard and evaluation bar scale dynamically while keeping controls compact.
+- **"Try Move" Sandbox Mode:** Click any piece on the board at any moment to pause live sync, test hypothetical moves, and get instant move classifications (*Best Move, Excellent, Good, Inaccuracy, Mistake, Blunder*), then return to the live match with one click.
+- **Adaptive Responsive UI:** Resize or maximize the window freely—on wide screens the control bar automatically docks into a vertical left column to maximize chessboard size, while compact windows keep controls neatly stacked on top. Includes on-board coordinates (`1–8`, `a–h`) and an auto-hiding dark PGN notation panel.
 
 ---
 
 ## 📁 Expected Folder Structure
 
 ```text
-ChessReader/
+ChessTracker/
 ├── chess_tracker.py        # Main application
 ├── chess_extension/        # Auto-generated Manifest V3 browser extension on first run
 ├── Rodent_IV/              # Engine folder (downloaded separately - see tutorial below)
@@ -35,16 +35,16 @@ ChessReader/
 
 ### 1. Prerequisites & Python Dependencies
 
-Make sure you have **Python 3.8+** installed (with `tkinter` enabled, which is included by default on Windows).
+Make sure you have **Python 3.8+** installed (with `tkinter` enabled, which is included by default on Windows and macOS; on Debian/Ubuntu Linux, install `sudo apt install python3-tk`).
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/mihneavk/ChessTracker.git
+   git clone https://github.com/mihneavk/ChessTracker
    cd ChessTracker
    ```
 2. Install the required Python libraries:
    ```bash
-   pip install chess numpy
+   pip install python-chess numpy
    ```
 
 ---
@@ -58,12 +58,12 @@ Make sure you have **Python 3.8+** installed (with `tkinter` enabled, which is i
 2. Extract the contents of **`FinalRodent.7z`** (using 7-Zip, WinRAR, or Windows 11's built-in archive extractor) into a folder named **`Rodent_IV`** inside the main project directory (next to `chess_tracker.py`).
 3. Verify that the executable path looks like this:
    ```text
-   ChessReader/Rodent_IV/rodent-iv-x64.exe
+   ChessTracker/Rodent_IV/rodent-iv-x64.exe
    ```
    *(Keep the accompanying `personalities/` and `books/` folders inside `Rodent_IV/` so the engine loads its configuration properly.)*
 
 > **Alternative / Custom Engines:**  
-> If you place `rodent-iv-x64.exe` in a different folder—or if you want to use another UCI engine such as **Stockfish**—launch the app, click **`⚙ Change Engine (.exe)`** in the top-right panel, and select your engine executable manually.
+> If you place `rodent-iv-x64.exe` in a different folder—or if you want to use another UCI engine such as **Stockfish**—launch the app, click **`⚙ Change Engine (.exe)`** in the right panel, and select your engine executable manually.
 
 ---
 
@@ -91,7 +91,7 @@ Make sure you have **Python 3.8+** installed (with `tkinter` enabled, which is i
 2. In the app, click **`🌐 Connect Browser (HTML)`** -> **`📋 Copy Tampermonkey Script`**.
 3. Create a new script in Tampermonkey, paste the code, and press **`Ctrl + S`** to save.
 
-3. Open **Chess.com** (or refresh your active tab with `F5`). The badge at the top of the app will turn green (**`● HTML Connected`**).
+3. Open **Chess.com** (or refresh your active tab with `F5`). The connection badge in the app will turn green (**`● HTML Connected`**).
 
 ---
 
