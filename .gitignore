@@ -1,0 +1,13 @@
+chess_extension/
+Rodent_IV/
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
