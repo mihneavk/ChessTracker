@@ -7,16 +7,24 @@ import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, ttk
 import numpy as np
 import chess
 import chess.pgn
 import chess.engine
 
+try:
+    import chess.polyglot
+    HAS_POLYGLOT = True
+except Exception:
+    HAS_POLYGLOT = False
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXT_DIR = os.path.join(BASE_DIR, "chess_extension")
 BRIDGE_PORT = 8765
-MAX_ANALYSIS_SECONDS = 5.0
+DEFAULT_MAX_TIME_SECONDS = 3.0
+ENGINE_HASH_MB = 256
+ENGINE_THREADS = 2
 
 PIECE_SYMBOLS = {
     'P': '♙', 'N': '♘', 'B': '♗', 'R': '♖', 'Q': '♕', 'K': '♔',
@@ -32,11 +40,182 @@ PIECE_TYPE_MAP = {
     'k': chess.KING,
 }
 
+# Engine Top 3 Arrow Colors
 ARROW_COLORS = {
     1: "#f59e0b",  # Rank 1 (thickest) - Amber/Gold
     2: "#38bdf8",  # Rank 2 (medium)   - Sky Blue
     3: "#c084fc",  # Rank 3 (thin)     - Purple
 }
+
+# Book Moves Arrow Colors (Rank 1..N)
+BOOK_ARROW_PALETTE = [
+    "#10b981",  # #1 main book move - Emerald Green
+    "#38bdf8",  # #2 book move      - Sky Blue
+    "#818cf8",  # #3 book move      - Indigo
+    "#2dd4bf",  # #4 book move      - Teal
+    "#a78bfa",  # #5 book move      - Soft Violet
+    "#94a3b8",  # #6+ book moves    - Slate Cyan
+]
+
+# ECO Opening Encyclopedia (A00 - E99) for Chess.com-style opening banner
+ECO_OPENING_LINES = [
+    ("A00", "Uncommon Opening", ""),
+    ("A00", "Polish Opening (Orangutan)", "1. b4"),
+    ("A00", "Polish Opening: Outflank Variation", "1. b4 c6"),
+    ("A00", "Grob's Attack", "1. g4"),
+    ("A00", "Larsen's Opening", "1. b3"),
+    ("A00", "Dunst Opening", "1. Nc3"),
+    ("A00", "Saragossa Opening", "1. c3"),
+    ("A00", "Mieses Opening", "1. d3"),
+    ("A00", "Van't Kruijs Opening", "1. e3"),
+    ("A00", "Barnes Opening", "1. f3"),
+    ("A00", "Anderssen's Opening", "1. a3"),
+    ("A01", "Nimzowitsch-Larsen Attack", "1. b3 e5 2. Bb2 Nc6"),
+    ("A02", "Bird's Opening", "1. f4"),
+    ("A03", "Bird's Opening: Dutch Variation", "1. f4 d5"),
+    ("A04", "Zukertort Opening", "1. Nf3"),
+    ("A05", "Zukertort Opening: Symmetric", "1. Nf3 Nf6"),
+    ("A06", "Zukertort Opening: Tennison / Santasiere", "1. Nf3 d5"),
+    ("A07", "King's Indian Attack", "1. Nf3 d5 2. g3"),
+    ("A09", "Réti Opening", "1. Nf3 d5 2. c4"),
+    ("A10", "English Opening", "1. c4"),
+    ("A13", "English Opening: Agincourt Defense", "1. c4 e6"),
+    ("A15", "English Opening: Anglo-Indian Defense", "1. c4 Nf6"),
+    ("A16", "English Opening: Anglo-Grünfeld", "1. c4 Nf6 2. Nc3 d5"),
+    ("A20", "English Opening: Reversed Sicilian", "1. c4 e5"),
+    ("A21", "English Opening: Reversed Sicilian", "1. c4 e5 2. Nc3"),
+    ("A22", "English Opening: Bremen System", "1. c4 e5 2. Nc3 Nf6"),
+    ("A25", "English Opening: Sicilian Reversed", "1. c4 e5 2. Nc3 Nc6"),
+    ("A30", "English Opening: Symmetrical Variation", "1. c4 c5"),
+    ("A34", "English Opening: Symmetrical, Three Knights", "1. c4 c5 2. Nc3 Nf6 3. Nf3"),
+    ("A40", "Queen's Pawn Game", "1. d4"),
+    ("A40", "Queen's Pawn: Horwitz Defense", "1. d4 e6"),
+    ("A40", "Modern Defense", "1. d4 g6"),
+    ("A41", "Queen's Pawn: Wade Defense", "1. d4 d6"),
+    ("A43", "Old Benoni Defense", "1. d4 c5"),
+    ("A45", "Indian Defense", "1. d4 Nf6"),
+    ("A45", "Trompowsky Attack", "1. d4 Nf6 2. Bg5"),
+    ("A46", "London System / Torre Attack", "1. d4 Nf6 2. Nf3"),
+    ("A48", "London System: East Indian", "1. d4 Nf6 2. Nf3 g6 3. Bf4"),
+    ("A50", "Indian Defense: Normal Variation", "1. d4 Nf6 2. c4"),
+    ("A51", "Budapest Gambit", "1. d4 Nf6 2. c4 e5"),
+    ("A52", "Budapest Gambit: Accepted", "1. d4 Nf6 2. c4 e5 3. dxe5 Ng4"),
+    ("A53", "Old Indian Defense", "1. d4 Nf6 2. c4 d6"),
+    ("A56", "Benoni Defense", "1. d4 Nf6 2. c4 c5 3. d5"),
+    ("A57", "Benko Gambit", "1. d4 Nf6 2. c4 c5 3. d5 b5"),
+    ("A60", "Modern Benoni", "1. d4 Nf6 2. c4 c5 3. d5 e6 4. Nc3 exd5 5. cxd5 d6"),
+    ("A80", "Dutch Defense", "1. d4 f5"),
+    ("A84", "Dutch Defense: Classical", "1. d4 f5 2. c4 e6"),
+    ("A87", "Dutch Defense: Leningrad Variation", "1. d4 f5 2. c4 Nf6 3. g3 g6"),
+    ("B00", "King's Pawn Game", "1. e4"),
+    ("B00", "Nimzowitsch Defense", "1. e4 Nc6"),
+    ("B00", "Owen's Defense", "1. e4 b6"),
+    ("B00", "St. George Defense", "1. e4 a6"),
+    ("B01", "Scandinavian Defense", "1. e4 d5"),
+    ("B01", "Scandinavian Defense: Mieses-Kotroc Variation", "1. e4 d5 2. exd5 Qxd5"),
+    ("B01", "Scandinavian Defense: Modern Variation", "1. e4 d5 2. exd5 Nf6"),
+    ("B01", "Scandinavian Defense: Classical Variation", "1. e4 d5 2. exd5 Nf6 3. Nf3 Qxd5 4. Nc3 Qa5"),
+    ("B01", "Scandinavian Defense: Main Line", "1. e4 d5 2. exd5 Qxd5 3. Nc3 Qa5"),
+    ("B02", "Alekhine's Defense", "1. e4 Nf6"),
+    ("B03", "Alekhine's Defense: Four Pawns / Exchange", "1. e4 Nf6 2. e5 Nd5 3. d4 d6"),
+    ("B06", "Modern Defense (Robatsch)", "1. e4 g6"),
+    ("B07", "Pirc Defense", "1. e4 d6 2. d4 Nf6 3. Nc3"),
+    ("B09", "Pirc Defense: Austrian Attack", "1. e4 d6 2. d4 Nf6 3. Nc3 g6 4. f4"),
+    ("B10", "Caro-Kann Defense", "1. e4 c6"),
+    ("B12", "Caro-Kann Defense: Advance Variation", "1. e4 c6 2. d4 d5 3. e5"),
+    ("B13", "Caro-Kann Defense: Exchange Variation", "1. e4 c6 2. d4 d5 3. exd5 cxd5"),
+    ("B14", "Caro-Kann Defense: Panov-Botvinnik Attack", "1. e4 c6 2. d4 d5 3. exd5 cxd5 4. c4"),
+    ("B15", "Caro-Kann Defense: Main Line", "1. e4 c6 2. d4 d5 3. Nc3"),
+    ("B18", "Caro-Kann Defense: Classical Variation", "1. e4 c6 2. d4 d5 3. Nc3 dxe4 4. Nxe4 Bf5"),
+    ("B20", "Sicilian Defense", "1. e4 c5"),
+    ("B21", "Sicilian Defense: Smith-Morra Gambit / McDonnell", "1. e4 c5 2. d4 cxd4 3. c3"),
+    ("B22", "Sicilian Defense: Alapin Variation", "1. e4 c5 2. c3"),
+    ("B23", "Sicilian Defense: Closed", "1. e4 c5 2. Nc3"),
+    ("B27", "Sicilian Defense: Hyperaccelerated Dragon", "1. e4 c5 2. Nf3 g6"),
+    ("B30", "Sicilian Defense: Old Sicilian / Rossolimo", "1. e4 c5 2. Nf3 Nc6"),
+    ("B31", "Sicilian Defense: Rossolimo Variation", "1. e4 c5 2. Nf3 Nc6 3. Bb5"),
+    ("B32", "Sicilian Defense: Open", "1. e4 c5 2. Nf3 Nc6 3. d4 cxd4 4. Nxd4"),
+    ("B33", "Sicilian Defense: Sveshnikov / Lasker-Pelikan", "1. e4 c5 2. Nf3 Nc6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 e5"),
+    ("B35", "Sicilian Defense: Accelerated Dragon", "1. e4 c5 2. Nf3 Nc6 3. d4 cxd4 4. Nxd4 g6 5. Nc3 Bg7"),
+    ("B40", "Sicilian Defense: French Variation", "1. e4 c5 2. Nf3 e6"),
+    ("B41", "Sicilian Defense: Kan Variation", "1. e4 c5 2. Nf3 e6 3. d4 cxd4 4. Nxd4 a6"),
+    ("B44", "Sicilian Defense: Taimanov Variation", "1. e4 c5 2. Nf3 e6 3. d4 cxd4 4. Nxd4 Nc6"),
+    ("B50", "Sicilian Defense: Modern Variations", "1. e4 c5 2. Nf3 d6"),
+    ("B52", "Sicilian Defense: Canal-Sokolsky Attack", "1. e4 c5 2. Nf3 d6 3. Bb5+"),
+    ("B54", "Sicilian Defense: Open", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4"),
+    ("B56", "Sicilian Defense: Classical", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3"),
+    ("B60", "Sicilian Defense: Richter-Rauzer", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 Nc6 6. Bg5"),
+    ("B70", "Sicilian Defense: Dragon Variation", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 g6"),
+    ("B80", "Sicilian Defense: Scheveningen Variation", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 e6"),
+    ("B90", "Sicilian Defense: Najdorf Variation", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6"),
+    ("B92", "Sicilian Najdorf: Opocensky Variation", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 6. Be2"),
+    ("B96", "Sicilian Najdorf: English Attack / Bg5", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 6. Bg5"),
+    ("C00", "French Defense", "1. e4 e6"),
+    ("C01", "French Defense: Exchange Variation", "1. e4 e6 2. d4 d5 3. exd5 exd5"),
+    ("C02", "French Defense: Advance Variation", "1. e4 e6 2. d4 d5 3. e5"),
+    ("C03", "French Defense: Tarrasch Variation", "1. e4 e6 2. d4 d5 3. Nd2"),
+    ("C10", "French Defense: Paulsen / Rubinstein", "1. e4 e6 2. d4 d5 3. Nc3"),
+    ("C11", "French Defense: Classical Variation", "1. e4 e6 2. d4 d5 3. Nc3 Nf6"),
+    ("C15", "French Defense: Winawer Variation", "1. e4 e6 2. d4 d5 3. Nc3 Bb4"),
+    ("C20", "King's Pawn Game: Open Game", "1. e4 e5"),
+    ("C21", "Danish Gambit / Center Game", "1. e4 e5 2. d4 exd4"),
+    ("C23", "Bishop's Opening", "1. e4 e5 2. Bc4"),
+    ("C25", "Vienna Game", "1. e4 e5 2. Nc3"),
+    ("C29", "Vienna Gambit", "1. e4 e5 2. Nc3 Nf6 3. f4"),
+    ("C30", "King's Gambit", "1. e4 e5 2. f4"),
+    ("C33", "King's Gambit Accepted", "1. e4 e5 2. f4 exf4"),
+    ("C40", "King's Knight Opening", "1. e4 e5 2. Nf3"),
+    ("C40", "Latvian Gambit", "1. e4 e5 2. Nf3 f5"),
+    ("C41", "Philidor Defense", "1. e4 e5 2. Nf3 d6"),
+    ("C42", "Petrov's Defense (Russian Game)", "1. e4 e5 2. Nf3 Nf6"),
+    ("C44", "Scotch Game / Ponziani", "1. e4 e5 2. Nf3 Nc6"),
+    ("C45", "Scotch Game", "1. e4 e5 2. Nf3 Nc6 3. d4 exd4 4. Nxd4"),
+    ("C46", "Three Knights Game", "1. e4 e5 2. Nf3 Nc6 3. Nc3"),
+    ("C47", "Four Knights Game", "1. e4 e5 2. Nf3 Nc6 3. Nc3 Nf6"),
+    ("C50", "Italian Game", "1. e4 e5 2. Nf3 Nc6 3. Bc4"),
+    ("C50", "Giuoco Pianissimo", "1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. d3"),
+    ("C51", "Evans Gambit", "1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. b4"),
+    ("C53", "Italian Game: Giuoco Piano", "1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3"),
+    ("C55", "Two Knights Defense", "1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6"),
+    ("C57", "Two Knights Defense: Fried Liver / Traxler", "1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5"),
+    ("C60", "Ruy Lopez (Spanish Game)", "1. e4 e5 2. Nf3 Nc6 3. Bb5"),
+    ("C65", "Ruy Lopez: Berlin Defense", "1. e4 e5 2. Nf3 Nc6 3. Bb5 Nf6"),
+    ("C68", "Ruy Lopez: Exchange Variation", "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Bxc6"),
+    ("C78", "Ruy Lopez: Morphy Defense", "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O"),
+    ("C84", "Ruy Lopez: Closed", "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7"),
+    ("C89", "Ruy Lopez: Marshall Attack", "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 O-O 8. c3 d5"),
+    ("D00", "Queen's Pawn Game: Closed", "1. d4 d5"),
+    ("D00", "Blackmar-Diemer Gambit", "1. d4 d5 2. e4 dxe4 3. Nc3"),
+    ("D02", "London System", "1. d4 d5 2. Nf3 Nf6 3. Bf4"),
+    ("D04", "Colle System", "1. d4 d5 2. Nf3 Nf6 3. e3"),
+    ("D06", "Queen's Gambit", "1. d4 d5 2. c4"),
+    ("D07", "Chigorin Defense", "1. d4 d5 2. c4 Nc6"),
+    ("D08", "Albin Countergambit", "1. d4 d5 2. c4 e5"),
+    ("D10", "Slav Defense", "1. d4 d5 2. c4 c6"),
+    ("D15", "Slav Defense: Three Knights", "1. d4 d5 2. c4 c6 3. Nf3 Nf6 4. Nc3"),
+    ("D20", "Queen's Gambit Accepted", "1. d4 d5 2. c4 dxc4"),
+    ("D30", "Queen's Gambit Declined", "1. d4 d5 2. c4 e6"),
+    ("D35", "Queen's Gambit Declined: Exchange Variation", "1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. cxd5 exd5"),
+    ("D37", "Queen's Gambit Declined: Classical", "1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. Nf3"),
+    ("D43", "Semi-Slav Defense", "1. d4 d5 2. c4 c6 3. Nf3 Nf6 4. Nc3 e6"),
+    ("D53", "Queen's Gambit Declined: Orthodox", "1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. Bg5 Be7"),
+    ("D70", "Neo-Grünfeld Defense", "1. d4 Nf6 2. c4 g6 3. f3 d5"),
+    ("D80", "Grünfeld Defense", "1. d4 Nf6 2. c4 g6 3. Nc3 d5"),
+    ("D85", "Grünfeld Defense: Exchange Variation", "1. d4 Nf6 2. c4 g6 3. Nc3 d5 4. cxd5 Nxd5 5. e4"),
+    ("E00", "Catalan Opening / Indian", "1. d4 Nf6 2. c4 e6"),
+    ("E01", "Catalan Opening: Closed", "1. d4 Nf6 2. c4 e6 3. g3 d5 4. Bg2"),
+    ("E11", "Bogo-Indian Defense", "1. d4 Nf6 2. c4 e6 3. Nf3 Bb4+"),
+    ("E12", "Queen's Indian Defense", "1. d4 Nf6 2. c4 e6 3. Nf3 b6"),
+    ("E20", "Nimzo-Indian Defense", "1. d4 Nf6 2. c4 e6 3. Nc3 Bb4"),
+    ("E32", "Nimzo-Indian: Classical Variation", "1. d4 Nf6 2. c4 e6 3. Nc3 Bb4 4. Qc2"),
+    ("E46", "Nimzo-Indian: Rubinstein System", "1. d4 Nf6 2. c4 e6 3. Nc3 Bb4 4. e3 O-O"),
+    ("E60", "King's Indian Defense", "1. d4 Nf6 2. c4 g6"),
+    ("E61", "King's Indian Defense: Normal", "1. d4 Nf6 2. c4 g6 3. Nc3 Bg7"),
+    ("E70", "King's Indian Defense: Classical / Makogonov", "1. d4 Nf6 2. c4 g6 3. Nc3 Bg7 4. e4 d6"),
+    ("E80", "King's Indian Defense: Sämisch Variation", "1. d4 Nf6 2. c4 g6 3. Nc3 Bg7 4. e4 d6 5. f3"),
+    ("E90", "King's Indian Defense: Classical, Nf3", "1. d4 Nf6 2. c4 g6 3. Nc3 Bg7 4. e4 d6 5. Nf3"),
+    ("E97", "King's Indian Defense: Mar del Plata", "1. d4 Nf6 2. c4 g6 3. Nc3 Bg7 4. e4 d6 5. Nf3 O-O 6. Be2 e5 7. O-O Nc6"),
+]
 
 TAMPERMONKEY_SCRIPT = f"""// ==UserScript==
 // @name         ChessReader HTML Bridge
@@ -340,6 +519,7 @@ class DarkAutoScrollbar(tk.Canvas):
         super().__init__(
             parent,
             width=width,
+            height=1,
             bg=bg,
             highlightthickness=0,
             bd=0,
@@ -430,8 +610,8 @@ class ChessScreenApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Chess.com HTML Live Tracker + Rodent IV")
-        self.root.geometry("1060x760")
-        self.root.minsize(920, 680)
+        self.root.geometry("1080x835")
+        self.root.minsize(940, 750)
         self.root.resizable(True, True)
         self.root.configure(bg="#000000")
 
@@ -458,28 +638,60 @@ class ChessScreenApp:
         self.selected_square = None
         self.legal_targets_for_selected = set()
 
-        # Arrows for Top 3 recommended moves: list of (rank_int, chess.Move)
+        # Arrows for Top 3 engine moves: list of (rank_int, chess.Move)
         self.top3_arrows = []
         self.preview_canvases = []
+        self.book_preview_canvases = []
 
         self.engine = None
         self.engine_path = self._auto_find_rodent()
+        self.engine_dir = (
+            os.path.dirname(os.path.abspath(self.engine_path))
+            if self.engine_path
+            else os.path.join(BASE_DIR, "Rodent_IV")
+        )
         self.engine_lock = threading.Lock()
         self.analysis_generation = 0
         self.is_analyzing = False
         self.current_eval_cp = 0.0
         self.current_eval_text = "0.0"
 
+        # Personalities / Player Emulation state
+        self.personality_var = tk.StringVar(value="Default (Standard)")
+        self.personality_map = {"Default (Standard)": "default.txt"}
+        self.personality_desc = ""
+        self._last_applied_pers = None
+        self._last_applied_elo = None
+
+        # Opening Book state (.bin Polyglot - defaults to main/rodent.bin)
+        self.book_var = tk.StringVar(value="")
+        self.book_map = {"Off (Engine Only)": None}
+        self._last_applied_book = None
+        self.eco_seq_index = {}        # tuple(uci_moves) -> (eco, name)
+        self.eco_fen_index = {}        # board_fen -> (eco, name)
+        self.current_opening_code = ""
+        self.current_opening_name = "Starting Position"
+        self.current_book_moves = []   # list of (chess.Move, san, weight, pct)
+
+        # Separate toggles for Evaluation, Book Moves, and Top 3 Engine Moves
+        self.time_var = tk.DoubleVar(value=DEFAULT_MAX_TIME_SECONDS)
         self.show_eval_var = tk.BooleanVar(value=False)
+        self.show_book_var = tk.BooleanVar(value=False)
         self.show_top3_var = tk.BooleanVar(value=False)
         self.elo_var = tk.IntVar(value=1500)
 
-        self.board_size = 560
+        self.board_size = 540
         self.controls_layout_mode = None
         self.top_bar_height_est = 66
+        self.opening_bar_height_est = 34
         self.side_bar_width = 216
 
+        self._build_eco_database()
+        self._configure_ttk_styles()
         self._build_ui()
+        self._refresh_personality_list(self.engine_dir)
+        self._refresh_book_list(self.engine_dir)
+        self._sync_book_and_engine_state(run_engine=False)
         self._draw_board()
         self._draw_eval_bar()
         self._update_pgn_display()
@@ -504,79 +716,736 @@ class ChessScreenApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ================= TIME & RANK PROFILES =================
+    # ================= ECO OPENING BANNER & POLYGLOT BOOK READER =================
+    def _build_eco_database(self):
+        """Builds fast sequence & transposition lookup tables for the Chess.com-style ECO banner."""
+        seq_idx = {}
+        fen_idx = {}
+
+        def register_line(eco, name, san_str):
+            b = chess.Board()
+            uci_seq = []
+            tokens = re.sub(r"\d+\.+", " ", san_str).split()
+            for tok in tokens:
+                tok_clean = tok.strip()
+                if not tok_clean or tok_clean in ("*", "1-0", "0-1", "1/2-1/2"):
+                    continue
+                try:
+                    mv = b.parse_san(tok_clean)
+                except Exception:
+                    break
+                b.push(mv)
+                uci_seq.append(mv.uci())
+
+            key_seq = tuple(uci_seq)
+            seq_idx[key_seq] = (eco, name)
+            fen_idx.setdefault(b.board_fen(), (eco, name))
+
+        for eco, name, moves_str in ECO_OPENING_LINES:
+            register_line(eco, name, moves_str)
+
+        for search_dir in (BASE_DIR, os.path.join(BASE_DIR, "Rodent_IV")):
+            if not os.path.isdir(search_dir):
+                continue
+            for fname in os.listdir(search_dir):
+                fpath = os.path.join(search_dir, fname)
+                if fname.lower().endswith(".tsv") and os.path.isfile(fpath):
+                    try:
+                        with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                            for line in f:
+                                parts = line.strip().split("\t")
+                                if len(parts) >= 3 and re.match(r"^[A-E]\d\d$", parts[0].strip()):
+                                    register_line(parts[0].strip(), parts[1].strip(), parts[2].strip())
+                    except Exception:
+                        pass
+
+        self.eco_seq_index = seq_idx
+        self.eco_fen_index = fen_idx
+
+    def _detect_current_opening(self):
+        """Detects the current opening (ECO + Name) from move history or board transposition."""
+        if len(self.board.move_stack) == 0:
+            bfen = self.board.board_fen()
+            if bfen == chess.STARTING_BOARD_FEN:
+                return "", "Starting Position"
+            if bfen in self.eco_fen_index:
+                return self.eco_fen_index[bfen]
+            return "", "Custom Position"
+
+        temp = chess.Board()
+        uci_prefix = []
+        best_eco = ""
+        best_name = ""
+
+        for mv in self.board.move_stack:
+            temp.push(mv)
+            uci_prefix.append(mv.uci())
+            t_key = tuple(uci_prefix)
+            if t_key in self.eco_seq_index:
+                best_eco, best_name = self.eco_seq_index[t_key]
+            elif temp.board_fen() in self.eco_fen_index:
+                best_eco, best_name = self.eco_fen_index[temp.board_fen()]
+
+        if best_name:
+            return best_eco, best_name
+        return "", "Unclassified Opening"
+
+    def _find_book_files(self, engine_dir=None):
+        """Finds all Polyglot .bin opening books in Rodent_IV/books, Rodent_IV, and BASE_DIR."""
+        found = []
+        seen_paths = set()
+        search_dirs = []
+
+        if engine_dir:
+            search_dirs.extend([
+                os.path.join(engine_dir, "books"),
+                os.path.join(os.path.dirname(engine_dir), "books"),
+                engine_dir,
+            ])
+        search_dirs.extend([
+            os.path.join(BASE_DIR, "Rodent_IV", "books"),
+            os.path.join(BASE_DIR, "books"),
+            BASE_DIR,
+        ])
+
+        for root_dir in search_dirs:
+            if not os.path.isdir(root_dir):
+                continue
+            for dirpath, _dirnames, filenames in os.walk(root_dir):
+                rel_depth = os.path.relpath(dirpath, root_dir).count(os.sep)
+                if rel_depth > 2:
+                    continue
+                for fname in sorted(filenames):
+                    if not fname.lower().endswith(".bin"):
+                        continue
+                    full_p = os.path.abspath(os.path.join(dirpath, fname))
+                    norm_p = os.path.normcase(full_p)
+                    if norm_p in seen_paths:
+                        continue
+                    seen_paths.add(norm_p)
+                    parent_name = os.path.basename(dirpath)
+                    if parent_name.lower() in ("guide", "main", "players"):
+                        label = f"{parent_name}/{fname}"
+                    else:
+                        label = fname
+                    found.append((label, full_p))
+
+        # Sort so main/rodent.bin appears at the very top of the dropdown
+        found.sort(
+            key=lambda item: (
+                0 if item[0].lower() == "main/rodent.bin" else (
+                    1 if item[0].lower().startswith("main/") else 2
+                ),
+                item[0].lower()
+            )
+        )
+        return found
+
+    def _refresh_book_list(self, engine_dir=None):
+        current_choice = self.book_var.get()
+        custom_entries = {
+            k: v for k, v in self.book_map.items()
+            if k not in ("Off (Engine Only)", "📂 Load Custom .bin...")
+            and v and os.path.isfile(v)
+        }
+
+        new_map = {"Off (Engine Only)": None}
+
+        for label, full_p in self._find_book_files(engine_dir):
+            disp = label
+            counter = 2
+            while disp in new_map:
+                disp = f"{label} ({counter})"
+                counter += 1
+            new_map[disp] = full_p
+
+        for k, v in custom_entries.items():
+            if v not in new_map.values():
+                new_map[k] = v
+
+        new_map["📂 Load Custom .bin..."] = "__LOAD_CUSTOM__"
+        self.book_map = new_map
+        self.book_combo["values"] = list(new_map.keys())
+
+        real_bins = [
+            k for k, v in new_map.items()
+            if v and v != "__LOAD_CUSTOM__"
+        ]
+
+        if current_choice and current_choice in new_map and current_choice != "📂 Load Custom .bin...":
+            self.book_var.set(current_choice)
+        elif real_bins:
+            preferred = (
+                next((k for k in real_bins if k.lower() == "main/rodent.bin"), None)
+                or next((k for k in real_bins if k.lower().startswith("main/") and "rodent" in k.lower()), None)
+                or next((k for k in real_bins if k.lower().startswith("main/")), None)
+                or next((k for k in real_bins if "rodent" in k.lower() and "guide" not in k.lower()), None)
+                or next((k for k in real_bins if "guide" not in k.lower()), None)
+                or real_bins[0]
+            )
+            self.book_var.set(preferred)
+        else:
+            self.book_var.set("Off (Engine Only)")
+
+        bin_count = len(real_bins)
+        if bin_count > 0:
+            self.book_count_lbl.config(text=f"({bin_count})", fg="#00ff66")
+        else:
+            self.book_count_lbl.config(text="(0)", fg="#ff5555")
+
+    def _select_custom_book_dialog(self):
+        initial_dir = os.path.join(self.engine_dir, "books", "main")
+        if not os.path.isdir(initial_dir):
+            initial_dir = os.path.join(self.engine_dir, "books")
+        if not os.path.isdir(initial_dir):
+            initial_dir = self.engine_dir if os.path.isdir(self.engine_dir) else BASE_DIR
+
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            title="Select Polyglot Opening Book (.bin)",
+            filetypes=[("Polyglot Opening Books", "*.bin"), ("All Files", "*.*")]
+        )
+        if path and os.path.isfile(path):
+            full_p = os.path.abspath(path)
+            label = os.path.basename(full_p)
+            existing_key = next((k for k, v in self.book_map.items() if v == full_p), None)
+            if existing_key:
+                self.book_var.set(existing_key)
+            else:
+                rebuilt = {}
+                for k, v in self.book_map.items():
+                    if v == "__LOAD_CUSTOM__":
+                        rebuilt[label] = full_p
+                    rebuilt[k] = v
+                self.book_map = rebuilt
+                self.book_combo["values"] = list(rebuilt.keys())
+                self.book_var.set(label)
+            self._on_book_changed()
+        else:
+            if self.book_var.get() == "📂 Load Custom .bin...":
+                real_bins = [k for k, v in self.book_map.items() if v and v != "__LOAD_CUSTOM__"]
+                self.book_var.set(real_bins[0] if real_bins else "Off (Engine Only)")
+
+    def _on_book_changed(self, _event=None):
+        selected = self.book_var.get()
+        if selected == "📂 Load Custom .bin...":
+            self._select_custom_book_dialog()
+            return
+
+        self._last_applied_book = None
+        self._sync_book_and_engine_state(run_engine=True)
+
+    def _get_book_moves_for_board(self, board_obj):
+        """
+        Reads ALL candidate book moves & weights for `board_obj` from the selected
+        Polyglot .bin file (e.g., main/rodent.bin).
+        Returns list of (chess.Move, san_str, weight_int, percentage_float).
+        """
+        selected_label = self.book_var.get()
+        book_target = self.book_map.get(selected_label)
+        if not book_target or book_target == "__LOAD_CUSTOM__":
+            return []
+
+        if not HAS_POLYGLOT or not os.path.isfile(book_target):
+            return []
+
+        raw_entries = []
+        try:
+            with chess.polyglot.open_reader(book_target) as reader:
+                for entry in reader.find_all(board_obj, minimum_weight=1):
+                    mv = entry.move
+                    if mv in board_obj.legal_moves:
+                        raw_entries.append((mv, max(1, int(entry.weight))))
+        except Exception:
+            return []
+
+        if not raw_entries:
+            return []
+
+        merged = {}
+        for mv, w in raw_entries:
+            merged[mv] = merged.get(mv, 0) + w
+
+        sorted_items = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)
+        total_w = max(1, sum(w for _, w in sorted_items))
+
+        results = []
+        for mv, w in sorted_items:
+            pct = (w / total_w) * 100.0
+            results.append((mv, board_obj.san(mv), w, pct))
+        return results
+
+    def _execute_test_move(self, move):
+        """Executes a move in Test Mode and immediately transitions cleanly out of book if needed."""
+        if move not in self.board.legal_moves:
+            return
+
+        matched_book = next((item for item in self.current_book_moves if item[0] == move), None)
+
+        if not self.sandbox_mode:
+            self.sandbox_mode = True
+            self.sandbox_base_ply = self.view_ply
+            self.sandbox_moves = []
+
+        board_before = self.board.copy(stack=False)
+        san_move = board_before.san(move)
+        self.board.push(move)
+        self.sandbox_moves.append(move)
+        board_after = self.board.copy(stack=False)
+
+        self.selected_square = None
+        self.legal_targets_for_selected = set()
+        self.top3_arrows = []
+
+        self._update_pgn_display()
+        self._update_nav_buttons()
+        status_txt, status_col = self._format_sync_status_text()
+        self.status_label.config(text=status_txt, fg=status_col)
+
+        if matched_book is not None:
+            self.move_verdict_lbl.config(
+                text=f"📖 {san_move}: Book Move ({matched_book[3]:.0f}% theory)\nContinuing theory / engine analysis...",
+                fg="#10b981"
+            )
+            self._sync_book_and_engine_state(run_engine=True)
+        else:
+            self._sync_book_and_engine_state(run_engine=False)
+            self._evaluate_tried_move(board_before, board_after, move, san_move)
+
+    def _play_book_move(self, move):
+        """Executes a user-chosen book move directly on the board (entering Test Mode)."""
+        self._execute_test_move(move)
+
+    def _clear_book_preview_canvases(self):
+        for cv in self.book_preview_canvases:
+            try:
+                cv.destroy()
+            except Exception:
+                pass
+        self.book_preview_canvases = []
+
+    def _set_book_message(self, msg, tag="info_text"):
+        self.book_text.config(state="normal", height=2)
+        self._clear_book_preview_canvases()
+        self.book_text.delete("1.0", tk.END)
+        self.book_text.insert(tk.END, msg, tag)
+        self.book_text.config(state="disabled")
+        self.root.after_idle(lambda: self.book_scroll.set(*self.book_text.yview()))
+
+    def _render_book_moves_list(self, book_moves):
+        """Renders ALL book moves cleanly, expanding up to 9 visible lines without scrolling."""
+        visible_rows = max(2, min(len(book_moves), 9))
+        self.book_text.config(state="normal", height=visible_rows)
+        self._clear_book_preview_canvases()
+        self.book_text.delete("1.0", tk.END)
+
+        for idx, (mv, san, _w, pct) in enumerate(book_moves):
+            if idx > 0:
+                self.book_text.insert(tk.END, "\n")
+
+            color = BOOK_ARROW_PALETTE[min(idx, len(BOOK_ARROW_PALETTE) - 1)]
+            if idx == 0:
+                width, arrowshape = 3.8, (6, 7, 4)
+            elif idx == 1:
+                width, arrowshape = 2.5, (6, 7, 3)
+            elif idx == 2:
+                width, arrowshape = 1.8, (5, 6, 3)
+            else:
+                width, arrowshape = 1.2, (5, 6, 2)
+
+            mini_cv = tk.Canvas(
+                self.book_text,
+                width=26,
+                height=12,
+                bg="#121212",
+                highlightthickness=0,
+                bd=0
+            )
+            mini_cv.create_line(
+                1, 6, 24, 6,
+                fill=color,
+                width=width,
+                arrow=tk.LAST,
+                arrowshape=arrowshape,
+                capstyle=tk.ROUND
+            )
+            self.book_preview_canvases.append(mini_cv)
+
+            rank_tag = "book_top" if idx == 0 else "book_row"
+            self.book_text.insert(tk.END, f"{idx + 1:>2}. ", rank_tag)
+            self.book_text.window_create(tk.END, window=mini_cv, align="center")
+
+            # Build short theoretical continuation from the book
+            cont_sans = []
+            tb = self.board.copy(stack=False)
+            tb.push(mv)
+            for _step in range(4):
+                nxt = self._get_book_moves_for_board(tb)
+                if nxt and nxt[0][0] in tb.legal_moves:
+                    cont_sans.append(nxt[0][1])
+                    tb.push(nxt[0][0])
+                else:
+                    break
+
+            cont_str = f" -> {' '.join(cont_sans)}" if cont_sans else ""
+            link_tag = f"book_mv_{idx}"
+            self.book_text.tag_configure(
+                link_tag,
+                foreground="#fde047" if idx == 0 else "#e5e7eb",
+                font=("Consolas", 8, "bold" if idx == 0 else "normal")
+            )
+            self.book_text.tag_bind(link_tag, "<Button-1>", lambda _e, m=mv: self._play_book_move(m))
+            self.book_text.tag_bind(link_tag, "<Enter>", lambda _e: self.book_text.config(cursor="hand2"))
+            self.book_text.tag_bind(link_tag, "<Leave>", lambda _e: self.book_text.config(cursor="arrow"))
+
+            move_col = f"{san:<5}"
+            pct_col = f"[{pct:>3.0f}%]"
+            self.book_text.insert(tk.END, f" {move_col} {pct_col}{cont_str}", link_tag)
+
+        self.book_text.config(state="disabled")
+        self.root.after_idle(lambda: self.book_scroll.set(*self.book_text.yview()))
+
+    def _sync_book_and_engine_state(self, run_engine=True):
+        """
+        Central coordinator for Opening Banner, Book Moves, and Top 3 Engine Moves:
+        - Always updates the Chess.com-style Opening Name banner.
+        - If Book Moves checkbox is ON: loads ALL moves from main/rodent.bin & shows ALL arrows.
+        - If BOTH Book Moves and Top 3 Moves are ON: Top 3 Moves pauses and calculates NOTHING
+          while book moves exist; once out of book (0 book moves), Top 3 Moves automatically runs!
+        """
+        eco, name = self._detect_current_opening()
+        self.current_opening_code = eco
+        self.current_opening_name = name
+
+        book_selected = self.book_var.get()
+        want_book = self.show_book_var.get()
+        want_top3 = self.show_top3_var.get()
+        want_eval = self.show_eval_var.get()
+
+        if want_book and book_selected != "Off (Engine Only)":
+            book_moves = self._get_book_moves_for_board(self.board)
+        else:
+            book_moves = []
+
+        self.current_book_moves = book_moves
+
+        # Update top Chess.com-style Opening Banner
+        if eco:
+            banner_txt = f"📖 {eco} • {name}"
+            banner_fg = "#f8fafc"
+        else:
+            banner_txt = f"📖 {name}"
+            banner_fg = "#cbd5e1"
+
+        if want_book and book_moves:
+            banner_txt += f"   [{len(book_moves)} book moves]"
+        self.opening_title_lbl.config(text=banner_txt, fg=banner_fg)
+
+        # Update dedicated Book Moves box
+        if not want_book:
+            self.book_meta_lbl.config(text=f"Book: {book_selected} | Disabled", fg="#6b7280")
+            self._set_book_message("Check 'Book Moves + All Book Arrows' to show all book moves.", "info_text")
+        elif book_selected == "Off (Engine Only)":
+            self.book_meta_lbl.config(text="Book: Off (Engine Only)", fg="#fbbf24")
+            self._set_book_message("Select a .bin opening book above (e.g. main/rodent.bin).", "warn_text")
+        elif book_moves:
+            self.book_meta_lbl.config(
+                text=f"✓ {book_selected} | {len(book_moves)} book move(s) (click to test)",
+                fg="#10b981"
+            )
+            self._render_book_moves_list(book_moves)
+        else:
+            self.book_meta_lbl.config(
+                text=f"Out of book [{book_selected}] | 0 book moves",
+                fg="#9ca3af"
+            )
+            self._set_book_message("Out of book — no theory moves left for this position.", "info_text")
+
+        # Handle mutual exclusion between Book Moves and Top 3 Moves
+        book_blocks_top3 = (want_book and len(book_moves) > 0)
+
+        if want_top3 and book_blocks_top3:
+            # Cancel any active engine search immediately and do NOT calculate Top 3 Moves
+            self.analysis_generation += 1
+            self.is_analyzing = False
+            self.top3_arrows = []
+            self.top3_meta_lbl.config(
+                text=f"⏸ Paused (In Book: {len(book_moves)} moves)",
+                fg="#10b981"
+            )
+            self._set_top3_message(
+                "Paused while book moves are available.\nWill calculate Top 3 Moves automatically once out of book.",
+                "info_text"
+            )
+            self._draw_board()
+            # If Evaluation Bar is also checked, still evaluate single position score
+            if run_engine and want_eval:
+                self._request_engine_analysis(skip_top3=True)
+            return
+
+        # Immediately clear any stale "Paused (In Book...)" status when out of book
+        if want_top3 and not run_engine:
+            prof = self._get_rank_profile()
+            style_tag = self._get_active_style_tag()
+            if self.board.turn == chess.WHITE:
+                self.side1_header_lbl.config(text=f"⚪ WHITE{style_tag} (to move):", fg="#f8fafc")
+            else:
+                self.side1_header_lbl.config(text=f"⚫ BLACK{style_tag} (to move):", fg="#fbbf24")
+            self.top3_meta_lbl.config(
+                text=f"⏳ {prof['rank_short']}{style_tag} | Out of book — preparing Top 3...",
+                fg="#fbbf24"
+            )
+            self._set_top3_message("Out of book — preparing Top 3 Moves...", "warn_text")
+
+        self._draw_board()
+
+        if run_engine and (want_top3 or want_eval):
+            self._request_engine_analysis(skip_top3=False)
+
+    def _on_toggle_book(self):
+        self._sync_book_and_engine_state(run_engine=True)
+
+    def _configure_ttk_styles(self):
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        style.configure(
+            "Dark.TCombobox",
+            fieldbackground="#1f2937",
+            background="#1f2937",
+            foreground="#ffffff",
+            arrowcolor="#00d4ff",
+            bordercolor="#374151",
+            lightcolor="#1f2937",
+            darkcolor="#1f2937",
+            padding=3,
+        )
+        style.map(
+            "Dark.TCombobox",
+            fieldbackground=[("readonly", "#1f2937")],
+            selectbackground=[("readonly", "#1f2937")],
+            selectforeground=[("readonly", "#ffffff")],
+            foreground=[("readonly", "#ffffff")],
+        )
+
+        self.root.option_add("*TCombobox*Listbox.background", "#18181b")
+        self.root.option_add("*TCombobox*Listbox.foreground", "#ffffff")
+        self.root.option_add("*TCombobox*Listbox.selectBackground", "#2563eb")
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        self.root.option_add("*TCombobox*Listbox.font", ("Consolas", 8))
+
+    def _get_max_time_cap(self):
+        try:
+            return max(0.5, min(10.0, float(self.time_var.get())))
+        except Exception:
+            return DEFAULT_MAX_TIME_SECONDS
+
+    def _on_time_changed(self, _val=None):
+        cap_sec = self._get_max_time_cap()
+        self.time_value_lbl.config(text=f"⏱ Target Time: {cap_sec:.1f}s")
+        self.chk_top3.config(text=f"Top 3 Moves + Arrows ({cap_sec:.1f}s)")
+        self._update_elo_labels()
+        self.analysis_generation += 1
+        self._sync_book_and_engine_state(run_engine=True)
+
+    # ================= PERSONALITIES & ELO-SCALED BUDGETS =================
+    def _format_personality_display_name(self, filename):
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        cleaned = stem.replace("_", " ").replace("-", " ").strip()
+        return " ".join(part.capitalize() for part in cleaned.split())
+
+    def _find_personalities_dir(self, engine_dir=None):
+        candidates = []
+        if engine_dir:
+            candidates.append(os.path.join(engine_dir, "personalities"))
+            candidates.append(os.path.join(os.path.dirname(engine_dir), "personalities"))
+        candidates.append(os.path.join(BASE_DIR, "Rodent_IV", "personalities"))
+        candidates.append(os.path.join(BASE_DIR, "personalities"))
+
+        for d in candidates:
+            if os.path.isdir(d):
+                return d
+        return None
+
+    def _refresh_personality_list(self, engine_dir=None, uci_combo_names=None):
+        mapping = {"Default (Standard)": "default.txt"}
+        seen_files = {"default.txt", "readme.txt", "---.txt"}
+
+        search_dirs = []
+        if engine_dir:
+            search_dirs.extend([engine_dir, os.path.dirname(engine_dir)])
+        search_dirs.append(os.path.join(BASE_DIR, "Rodent_IV"))
+
+        for d in search_dirs:
+            basic_ini = os.path.join(d, "basic.ini")
+            if os.path.isfile(basic_ini):
+                try:
+                    with open(basic_ini, "r", encoding="utf-8", errors="ignore") as f:
+                        for raw_line in f:
+                            line = raw_line.strip()
+                            if not line or line.startswith((";", "#", "[")):
+                                continue
+                            if "=" in line:
+                                label, fname = [x.strip() for x in line.split("=", 1)]
+                                fname_base = os.path.basename(fname)
+                                if (
+                                    fname_base.lower().endswith(".txt")
+                                    and fname_base.lower() not in seen_files
+                                    and not label.startswith("---")
+                                ):
+                                    mapping[label] = fname_base
+                                    seen_files.add(fname_base.lower())
+                except Exception:
+                    pass
+                break
+
+        pers_dir = self._find_personalities_dir(engine_dir)
+        extra_entries = []
+        if pers_dir:
+            for fname in os.listdir(pers_dir):
+                if not fname.lower().endswith(".txt"):
+                    continue
+                if fname.lower() in seen_files or fname.startswith("---"):
+                    continue
+                seen_files.add(fname.lower())
+                disp = self._format_personality_display_name(fname)
+                extra_entries.append((disp, fname))
+
+        if uci_combo_names:
+            for item in uci_combo_names:
+                if item.lower() in ("default", "default (standard)") or item.startswith("---"):
+                    continue
+                if item not in mapping and all(item != d for d, _ in extra_entries):
+                    extra_entries.append((item, item))
+
+        combined_non_default = [
+            (k, v) for k, v in mapping.items() if k != "Default (Standard)"
+        ] + extra_entries
+        combined_non_default.sort(key=lambda pair: pair[0].lower())
+
+        ordered_map = {"Default (Standard)": "default.txt"}
+        for disp, fname in combined_non_default:
+            ordered_map[disp] = fname
+
+        self.personality_map = ordered_map
+        display_values = list(ordered_map.keys())
+        self.personality_combo["values"] = display_values
+
+        if self.personality_var.get() not in ordered_map:
+            self.personality_var.set("Default (Standard)")
+
+        count_players = max(0, len(display_values) - 1)
+        if count_players > 0:
+            self.pers_count_lbl.config(text=f"({count_players})", fg="#00ff66")
+        else:
+            self.pers_count_lbl.config(text="", fg="#777777")
+
+    def _parse_personality_metadata(self, filename):
+        pers_dir = self._find_personalities_dir(self.engine_dir)
+        if not pers_dir or not filename:
+            return None, ""
+
+        fpath = os.path.join(pers_dir, filename)
+        if not os.path.isfile(fpath):
+            return None, ""
+
+        parsed_elo = None
+        desc_parts = []
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                for idx, raw_line in enumerate(f):
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    if line.startswith((";", "#")):
+                        if idx < 4:
+                            clean_comment = line.lstrip(";#").strip()
+                            if clean_comment and not clean_comment.lower().startswith("author"):
+                                desc_parts.append(clean_comment)
+                        continue
+                    m_elo = re.match(r"^(?:UCI_Elo|Elo)\s*=?\s*(\d+)", line, re.IGNORECASE)
+                    if m_elo:
+                        parsed_elo = int(m_elo.group(1))
+        except Exception:
+            pass
+
+        return parsed_elo, " ".join(desc_parts)[:60]
+
+    def _on_personality_changed(self, _event=None):
+        selected = self.personality_var.get()
+        filename = self.personality_map.get(selected, "default.txt")
+
+        if selected == "Default (Standard)":
+            self.personality_desc = ""
+        else:
+            parsed_elo, desc = self._parse_personality_metadata(filename)
+            self.personality_desc = desc
+            if parsed_elo is not None:
+                clamped_elo = max(800, min(2850, int(round(parsed_elo / 50.0) * 50)))
+                self.elo_var.set(clamped_elo)
+
+        self._update_elo_labels()
+        self.analysis_generation += 1
+        self._sync_book_and_engine_state(run_engine=True)
+
     def _get_rank_profile(self, elo=None):
+        """
+        Always uses the full Target Time set on the timer slider while relying on
+        Rodent IV's UCI_Elo setting for strength calibration.
+        """
         if elo is None:
             elo = self.elo_var.get()
 
+        cap_sec = self._get_max_time_cap()
+
         if elo >= 2850:
-            return {
-                "rank_short": "MAX (~2975)",
-                "rank_desc": "MAX (~2975 Elo)",
-                "primary_time": 0.90,
-                "refine_time": 0.45,
-                "screen_time": 0.06,
-                "max_candidates": 9,
-                "max_depth": 14,
-                "est_top3": 2.3,
-                "est_eval": 0.8,
-            }
+            rank_short = "MAX (~2975)"
+            rank_desc = "MAX (~2975 Elo)"
         elif elo >= 2400:
-            return {
-                "rank_short": f"{elo} Elo",
-                "rank_desc": f"{elo} Elo (Grandmaster)",
-                "primary_time": 0.75,
-                "refine_time": 0.38,
-                "screen_time": 0.05,
-                "max_candidates": 8,
-                "max_depth": 13,
-                "est_top3": 1.9,
-                "est_eval": 0.7,
-            }
+            rank_short = f"{elo} Elo"
+            rank_desc = f"{elo} Elo (Grandmaster)"
         elif elo >= 2000:
-            return {
-                "rank_short": f"{elo} Elo",
-                "rank_desc": f"{elo} Elo (Master)",
-                "primary_time": 0.60,
-                "refine_time": 0.30,
-                "screen_time": 0.05,
-                "max_candidates": 8,
-                "max_depth": 12,
-                "est_top3": 1.6,
-                "est_eval": 0.6,
-            }
+            rank_short = f"{elo} Elo"
+            rank_desc = f"{elo} Elo (Master)"
         elif elo >= 1500:
-            return {
-                "rank_short": f"{elo} Elo",
-                "rank_desc": f"{elo} Elo (Intermediate)",
-                "primary_time": 0.45,
-                "refine_time": 0.24,
-                "screen_time": 0.04,
-                "max_candidates": 7,
-                "max_depth": 11,
-                "est_top3": 1.2,
-                "est_eval": 0.5,
-            }
+            rank_short = f"{elo} Elo"
+            rank_desc = f"{elo} Elo (Intermediate)"
+        elif elo >= 1150:
+            rank_short = f"{elo} Elo"
+            rank_desc = f"{elo} Elo (Club)"
         else:
-            return {
-                "rank_short": f"{elo} Elo",
-                "rank_desc": f"{elo} Elo (Beginner / Club)",
-                "primary_time": 0.28,
-                "refine_time": 0.15,
-                "screen_time": 0.03,
-                "max_candidates": 5,
-                "max_depth": 9,
-                "est_top3": 0.8,
-                "est_eval": 0.3,
-            }
+            rank_short = f"{elo} Elo"
+            rank_desc = f"{elo} Elo (Beginner)"
+
+        return {
+            "rank_short": rank_short,
+            "rank_desc": rank_desc,
+            "eff_budget": cap_sec,
+            "cap_sec": cap_sec,
+        }
+
+    def _get_active_style_tag(self):
+        pers = self.personality_var.get()
+        if not pers or pers == "Default (Standard)":
+            return ""
+        return f" [{pers}]"
 
     def _update_elo_labels(self):
         prof = self._get_rank_profile()
         elo = self.elo_var.get()
+        pers = self.personality_var.get()
         color = "#f59e0b" if elo >= 2850 else "#00d4ff"
-        self.elo_value_lbl.config(text=f"Level: {prof['rank_desc']}", fg=color)
-        self.elo_time_hint_lbl.config(
-            text=f"Rank: {prof['rank_short']} | Est: ~{prof['est_top3']:.1f}s (cap {MAX_ANALYSIS_SECONDS:.0f}s)"
+
+        if pers and pers != "Default (Standard)":
+            self.elo_value_lbl.config(text=f"{pers} • {prof['rank_short']}", fg=color)
+        else:
+            self.elo_value_lbl.config(text=f"Level: {prof['rank_desc']}", fg=color)
+
+        self.time_hint_lbl.config(
+            text=f"Guaranteed Top 3 | Full {prof['cap_sec']:.1f}s search | {ENGINE_THREADS} threads"
         )
 
     # ================= LOCAL SERVER FOR HTML BRIDGE =================
@@ -671,10 +1540,21 @@ class ChessScreenApp:
                 sq_set.add(chess.square(f_idx, r_idx))
         return sq_set
 
+    def _infer_castling_rights(self, b):
+        rights = 0
+        if b.piece_at(chess.E1) == chess.Piece(chess.KING, chess.WHITE):
+            if b.piece_at(chess.H1) == chess.Piece(chess.ROOK, chess.WHITE):
+                rights |= chess.BB_H1
+            if b.piece_at(chess.A1) == chess.Piece(chess.ROOK, chess.WHITE):
+                rights |= chess.BB_A1
+        if b.piece_at(chess.E8) == chess.Piece(chess.KING, chess.BLACK):
+            if b.piece_at(chess.H8) == chess.Piece(chess.ROOK, chess.BLACK):
+                rights |= chess.BB_H8
+            if b.piece_at(chess.A8) == chess.Piece(chess.ROOK, chess.BLACK):
+                rights |= chess.BB_A8
+        return rights
+
     def _reconstruct_board_from_payload(self, payload, reference_board):
-        """
-        Returns (reconstructed_board, (active_ply, total_plies), full_match_moves_list)
-        """
         pieces_data = payload.get("pieces", [])
         if not pieces_data:
             return None, (0, 0), []
@@ -772,6 +1652,8 @@ class ChessScreenApp:
                     return b_next, (ply_now, max(ply_now, total_plies)), list(b_next.move_stack)
 
         self.known_san_sequence = []
+        dom_board.castling_rights = self._infer_castling_rights(dom_board)
+
         last_moved_color = None
         for sq in hl_squares:
             piece_on_hl = dom_board.piece_at(sq)
@@ -781,8 +1663,15 @@ class ChessScreenApp:
 
         if last_moved_color is not None:
             dom_board.turn = not last_moved_color
+        elif reference_board is not None and reference_board.board_fen() != target_board_fen:
+            dom_board.turn = not reference_board.turn
         else:
             dom_board.turn = chess.WHITE
+
+        if not dom_board.is_valid():
+            dom_board.turn = not dom_board.turn
+            if not dom_board.is_valid():
+                return None, (0, 0), []
 
         return dom_board, (0, 0), []
 
@@ -830,18 +1719,30 @@ class ChessScreenApp:
         self.match_moves = full_match_moves
         self.last_html_ply = html_ply
         self.last_html_board_fen = reconstructed.board_fen()
-        self.flipped = bool(payload.get("flipped", False))
+        new_flipped = bool(payload.get("flipped", False))
+        flip_changed = (new_flipped != self.flipped)
+        self.flipped = new_flipped
 
-        if self.sandbox_mode:
+        if flip_changed and self.show_eval_var.get():
+            self._draw_eval_bar()
+
+        if (self.sandbox_mode or self.manual_history_nav) and not html_changed and not force_analysis:
             self._update_nav_buttons()
             return
 
-        if self.manual_history_nav and not html_changed and not force_analysis:
-            self._update_nav_buttons()
-            return
-
+        was_in_review_or_sandbox = self.sandbox_mode or self.manual_history_nav
+        self.sandbox_mode = False
+        self.sandbox_moves = []
         self.manual_history_nav = False
+        self.selected_square = None
+        self.legal_targets_for_selected = set()
         self.view_ply = html_ply
+
+        if was_in_review_or_sandbox and html_changed:
+            self.move_verdict_lbl.config(
+                text="New move detected in live match.\nReturned automatically to live position.",
+                fg="#00ff66"
+            )
 
         if full_match_moves:
             target_board = chess.Board()
@@ -858,15 +1759,13 @@ class ChessScreenApp:
         if board_changed:
             self.top3_arrows = []
 
-        self._draw_board()
         self._update_pgn_display()
         self._update_nav_buttons()
 
         status_txt, status_col = self._format_sync_status_text()
         self.status_label.config(text=status_txt, fg=status_col)
 
-        if board_changed or force_analysis:
-            self._request_engine_analysis()
+        self._sync_book_and_engine_state(run_engine=(board_changed or force_analysis))
 
     def _show_browser_connect_dialog(self):
         win = tk.Toplevel(self.root)
@@ -1006,19 +1905,54 @@ class ChessScreenApp:
                     pass
                 self.engine = None
 
+            self._last_applied_pers = None
+            self._last_applied_elo = None
+            self._last_applied_book = None
+
             try:
                 engine_dir = os.path.dirname(os.path.abspath(path))
                 eng = chess.engine.SimpleEngine.popen_uci(path, cwd=engine_dir)
                 self.engine = eng
                 self.engine_path = path
+                self.engine_dir = engine_dir
+
+                init_opts = {}
+                applied_threads = 1
+                if "Threads" in eng.options:
+                    t_min = eng.options["Threads"].min or 1
+                    t_max = eng.options["Threads"].max or 16
+                    applied_threads = max(t_min, min(t_max, ENGINE_THREADS))
+                    init_opts["Threads"] = applied_threads
+                if "Hash" in eng.options:
+                    h_min = eng.options["Hash"].min or 16
+                    h_max = eng.options["Hash"].max or 2048
+                    init_opts["Hash"] = max(h_min, min(h_max, ENGINE_HASH_MB))
+                if "UseBook" in eng.options:
+                    init_opts["UseBook"] = False
+                if init_opts:
+                    try:
+                        eng.configure(init_opts)
+                    except Exception:
+                        pass
+
+                combo_choices = None
+                if "Personality" in eng.options and getattr(eng.options["Personality"], "var", None):
+                    combo_choices = list(eng.options["Personality"].var)
+
                 self._apply_rodent_difficulty_locked()
 
                 bot_name = os.path.basename(path)
-                self.root.after(0, lambda: self.engine_status_lbl.config(
-                    text=f"✓ Auto-connected: {bot_name}",
-                    fg="#00ff66"
-                ))
-                self.root.after(0, self._request_engine_analysis)
+
+                def on_engine_ready():
+                    self._refresh_personality_list(engine_dir, combo_choices)
+                    self._refresh_book_list(engine_dir)
+                    self.engine_status_lbl.config(
+                        text=f"✓ {bot_name} ({applied_threads} Threads, {ENGINE_HASH_MB}MB Hash)",
+                        fg="#00ff66"
+                    )
+                    self._sync_book_and_engine_state(run_engine=True)
+
+                self.root.after(0, on_engine_ready)
             except Exception as e:
                 self.engine = None
                 self.root.after(0, lambda: self.engine_status_lbl.config(
@@ -1029,42 +1963,110 @@ class ChessScreenApp:
                     "Rodent IV Error", f"Could not start the engine:\n{e}"
                 ))
 
+    def _restart_engine_locked(self):
+        """Recovers cleanly if Rodent IV's UCI pipe ever stalls or exits."""
+        if not self.engine_path or not os.path.isfile(self.engine_path):
+            return False
+        if self.engine:
+            try:
+                self.engine.kill()
+            except Exception:
+                pass
+            self.engine = None
+
+        self._last_applied_pers = None
+        self._last_applied_elo = None
+        self._last_applied_book = None
+
+        try:
+            engine_dir = os.path.dirname(os.path.abspath(self.engine_path))
+            eng = chess.engine.SimpleEngine.popen_uci(self.engine_path, cwd=engine_dir)
+            self.engine = eng
+            opts = {}
+            if "Threads" in eng.options:
+                opts["Threads"] = max(eng.options["Threads"].min or 1, min(eng.options["Threads"].max or 16, ENGINE_THREADS))
+            if "Hash" in eng.options:
+                opts["Hash"] = max(eng.options["Hash"].min or 16, min(eng.options["Hash"].max or 2048, ENGINE_HASH_MB))
+            if "UseBook" in eng.options:
+                opts["UseBook"] = False
+            if opts:
+                eng.configure(opts)
+            self._apply_rodent_difficulty_locked()
+            return True
+        except Exception:
+            self.engine = None
+            return False
+
+    def _apply_rodent_book_locked(self):
+        """
+        Always keeps Rodent IV's internal UCI UseBook disabled because Python
+        reads the Polyglot .bin book directly. This prevents Rodent IV from
+        stalling on internal book probes during UCI analysis.
+        """
+        if not self.engine:
+            return
+        if self._last_applied_book == "PYTHON_POLYGLOT_ONLY":
+            return
+        if "UseBook" in self.engine.options:
+            try:
+                self.engine.configure({"UseBook": False})
+            except Exception:
+                pass
+        self._last_applied_book = "PYTHON_POLYGLOT_ONLY"
+
     def _apply_rodent_difficulty_locked(self, force_max=False):
         if not self.engine:
             return
-        elo = self.elo_var.get()
-        opts = {}
 
-        if "UseBook" in self.engine.options:
-            opts["UseBook"] = False
+        self._apply_rodent_book_locked()
 
-        if force_max or elo >= 2850:
-            if "UCI_LimitStrength" in self.engine.options:
-                opts["UCI_LimitStrength"] = False
-        else:
-            if "UCI_LimitStrength" in self.engine.options:
-                opts["UCI_LimitStrength"] = True
-            if "UCI_Elo" in self.engine.options:
-                min_elo = self.engine.options["UCI_Elo"].min or 600
-                max_elo = self.engine.options["UCI_Elo"].max or 2800
-                opts["UCI_Elo"] = max(min_elo, min(max_elo, int(elo)))
-        if opts:
-            try:
-                self.engine.configure(opts)
-            except Exception:
-                pass
+        selected_pers = self.personality_var.get()
+        if selected_pers != self._last_applied_pers:
+            pers_filename = self.personality_map.get(selected_pers, "default.txt")
+            pers_opts = {}
+            if "PersonalityFile" in self.engine.options:
+                pers_opts["PersonalityFile"] = pers_filename
+            elif "Personality" in self.engine.options:
+                combo_vars = getattr(self.engine.options["Personality"], "var", None) or []
+                if selected_pers == "Default (Standard)":
+                    if "Default" in combo_vars:
+                        pers_opts["Personality"] = "Default"
+                elif selected_pers in combo_vars:
+                    pers_opts["Personality"] = selected_pers
+            if pers_opts:
+                try:
+                    self.engine.configure(pers_opts)
+                except Exception:
+                    pass
+            self._last_applied_pers = selected_pers
+            self._last_applied_elo = None
+            self._last_applied_book = None
+            self._apply_rodent_book_locked()
+
+        target_elo_state = "MAX" if (force_max or self.elo_var.get() >= 2850) else int(self.elo_var.get())
+        if target_elo_state != self._last_applied_elo:
+            opts = {}
+            if target_elo_state == "MAX":
+                if "UCI_LimitStrength" in self.engine.options:
+                    opts["UCI_LimitStrength"] = False
+            else:
+                if "UCI_LimitStrength" in self.engine.options:
+                    opts["UCI_LimitStrength"] = True
+                if "UCI_Elo" in self.engine.options:
+                    min_elo = self.engine.options["UCI_Elo"].min or 600
+                    max_elo = self.engine.options["UCI_Elo"].max or 2800
+                    opts["UCI_Elo"] = max(min_elo, min(max_elo, target_elo_state))
+            if opts:
+                try:
+                    self.engine.configure(opts)
+                except Exception:
+                    pass
+            self._last_applied_elo = target_elo_state
 
     def _on_elo_changed(self, _val=None):
         self._update_elo_labels()
         self.analysis_generation += 1
-
-        if self.engine:
-            def reconfigure():
-                with self.engine_lock:
-                    self._apply_rodent_difficulty_locked()
-                self.root.after(0, self._request_engine_analysis)
-
-            threading.Thread(target=reconfigure, daemon=True).start()
+        self._sync_book_and_engine_state(run_engine=True)
 
     def _select_rodent_dialog(self):
         initial_dir = os.path.join(BASE_DIR, "Rodent_IV")
@@ -1082,12 +2084,12 @@ class ChessScreenApp:
     # ================= RESPONSIVE UI CONSTRUCTION =================
     def _build_ui(self):
         main_container = tk.Frame(self.root, bg="#000000")
-        main_container.pack(fill="both", expand=True, padx=14, pady=10)
+        main_container.pack(fill="both", expand=True, padx=14, pady=8)
 
         right_frame = tk.Frame(
             main_container,
             bg="#0a0a0a",
-            width=425,
+            width=430,
             highlightthickness=1,
             highlightbackground="#262626"
         )
@@ -1165,7 +2167,32 @@ class ChessScreenApp:
 
         self.board_stage_frame = tk.Frame(self.left_frame, bg="#000000")
 
-        self.board_row_frame = tk.Frame(self.board_stage_frame, bg="#000000")
+        # --- CHESS.COM-STYLE OPENING BANNER ABOVE THE BOARD ---
+        self.opening_banner_frame = tk.Frame(
+            self.board_stage_frame,
+            bg="#111318",
+            highlightthickness=1,
+            highlightbackground="#262b36"
+        )
+        self.opening_banner_frame.pack(side=tk.TOP, fill="x", padx=6, pady=(2, 6))
+
+        self.opening_title_lbl = tk.Label(
+            self.opening_banner_frame,
+            text="📖 Starting Position",
+            bg="#111318",
+            fg="#f8fafc",
+            font=("Consolas", 9, "bold"),
+            anchor="w",
+            padx=10,
+            pady=4
+        )
+        self.opening_title_lbl.pack(fill="x")
+
+        # --- BOARD CONTAINER BELOW OPENING BANNER ---
+        self.board_center_area = tk.Frame(self.board_stage_frame, bg="#000000")
+        self.board_center_area.pack(side=tk.TOP, fill="both", expand=True)
+
+        self.board_row_frame = tk.Frame(self.board_center_area, bg="#000000")
         self.board_row_frame.place(relx=0.5, rely=0.5, anchor="center")
 
         self.canvas = tk.Canvas(
@@ -1190,21 +2217,23 @@ class ChessScreenApp:
             highlightbackground="#333333"
         )
 
-        # Start in horizontal top mode; auto-switches to side column if space permits
         self._apply_controls_layout("top")
 
-        # ================= RIGHT SIDE (RODENT IV ENGINE + NAV + PGN) =================
+        # ================= RIGHT SIDE (ENGINE + BOOK MOVES + TOP 3 MOVES + NAV + PGN) =================
+        top_hdr = tk.Frame(right_frame, bg="#0a0a0a")
+        top_hdr.pack(fill="x", padx=12, pady=(8, 2))
+
         tk.Label(
-            right_frame,
+            top_hdr,
             text="RODENT IV ENGINE",
             bg="#0a0a0a",
             fg="#ffffff",
             font=("Consolas", 11, "bold")
-        ).pack(pady=(10, 4))
+        ).pack(side=tk.LEFT)
 
         self.select_bot_btn = tk.Button(
-            right_frame,
-            text="⚙ Change Engine (.exe)",
+            top_hdr,
+            text="⚙ Change .exe",
             command=self._select_rodent_dialog,
             bg="#1f2937",
             fg="#ffffff",
@@ -1212,11 +2241,11 @@ class ChessScreenApp:
             activeforeground="#ffffff",
             relief="flat",
             font=("Consolas", 8, "bold"),
-            padx=10,
-            pady=4,
+            padx=8,
+            pady=2,
             cursor="hand2"
         )
-        self.select_bot_btn.pack(pady=(0, 2))
+        self.select_bot_btn.pack(side=tk.RIGHT)
 
         self.engine_status_lbl = tk.Label(
             right_frame,
@@ -1224,12 +2253,13 @@ class ChessScreenApp:
             bg="#0a0a0a",
             fg="#ffaa00",
             font=("Consolas", 8),
-            justify="center"
+            anchor="w"
         )
-        self.engine_status_lbl.pack(pady=(2, 6))
+        self.engine_status_lbl.pack(fill="x", padx=12, pady=(0, 5))
 
+        # --- ELO, PLAYER STYLE & OPENING BOOK BOX ---
         diff_frame = tk.Frame(right_frame, bg="#111111", highlightthickness=1, highlightbackground="#222222")
-        diff_frame.pack(fill="x", padx=12, pady=4)
+        diff_frame.pack(fill="x", padx=12, pady=(0, 6))
 
         self.elo_value_lbl = tk.Label(
             diff_frame,
@@ -1238,7 +2268,7 @@ class ChessScreenApp:
             fg="#00d4ff",
             font=("Consolas", 9, "bold")
         )
-        self.elo_value_lbl.pack(pady=(6, 0))
+        self.elo_value_lbl.pack(pady=(5, 0))
 
         self.elo_slider = tk.Scale(
             diff_frame,
@@ -1254,20 +2284,143 @@ class ChessScreenApp:
             highlightthickness=0,
             showvalue=False,
             sliderlength=16,
-            length=360,
+            length=375,
             cursor="hand2"
         )
-        self.elo_slider.pack(padx=12, pady=(2, 2))
+        self.elo_slider.pack(padx=12, pady=(1, 3))
 
-        self.elo_time_hint_lbl = tk.Label(
-            diff_frame,
-            text="Rank: 1500 Elo | Est: ~1.2s (cap 5s)",
+        pers_row = tk.Frame(diff_frame, bg="#111111")
+        pers_row.pack(fill="x", padx=12, pady=(0, 4))
+
+        tk.Label(
+            pers_row,
+            text="🎭 Player:",
+            bg="#111111",
+            fg="#e5e7eb",
+            font=("Consolas", 8, "bold"),
+            width=9,
+            anchor="w"
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.personality_combo = ttk.Combobox(
+            pers_row,
+            textvariable=self.personality_var,
+            values=["Default (Standard)"],
+            state="readonly",
+            style="Dark.TCombobox",
+            font=("Consolas", 8, "bold"),
+            width=22
+        )
+        self.personality_combo.pack(side=tk.LEFT, fill="x", expand=True)
+        self.personality_combo.bind("<<ComboboxSelected>>", self._on_personality_changed)
+
+        self.pers_count_lbl = tk.Label(
+            pers_row,
+            text="",
+            bg="#111111",
+            fg="#777777",
+            font=("Consolas", 7)
+        )
+        self.pers_count_lbl.pack(side=tk.LEFT, padx=(6, 0))
+
+        # --- OPENING BOOK SELECTOR ROW (DEFAULTS TO main/rodent.bin) ---
+        book_row = tk.Frame(diff_frame, bg="#111111")
+        book_row.pack(fill="x", padx=12, pady=(0, 5))
+
+        tk.Label(
+            book_row,
+            text="📖 Book:",
+            bg="#111111",
+            fg="#10b981",
+            font=("Consolas", 8, "bold"),
+            width=9,
+            anchor="w"
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.book_combo = ttk.Combobox(
+            book_row,
+            textvariable=self.book_var,
+            values=["Off (Engine Only)"],
+            state="readonly",
+            style="Dark.TCombobox",
+            font=("Consolas", 8, "bold"),
+            width=19
+        )
+        self.book_combo.pack(side=tk.LEFT, fill="x", expand=True)
+        self.book_combo.bind("<<ComboboxSelected>>", self._on_book_changed)
+
+        self.load_book_btn = tk.Button(
+            book_row,
+            text="📂",
+            command=self._select_custom_book_dialog,
+            bg="#1f2937",
+            fg="#38bdf8",
+            activebackground="#374151",
+            activeforeground="#ffffff",
+            relief="flat",
+            font=("Consolas", 8, "bold"),
+            padx=5,
+            pady=1,
+            cursor="hand2"
+        )
+        self.load_book_btn.pack(side=tk.LEFT, padx=(4, 0))
+
+        self.book_count_lbl = tk.Label(
+            book_row,
+            text="",
+            bg="#111111",
+            fg="#777777",
+            font=("Consolas", 7)
+        )
+        self.book_count_lbl.pack(side=tk.LEFT, padx=(4, 0))
+
+        # --- TARGET TIME BOX ---
+        time_box = tk.Frame(
+            right_frame,
+            bg="#111111",
+            highlightthickness=1,
+            highlightbackground="#222222"
+        )
+        time_box.pack(fill="x", padx=12, pady=(0, 6))
+
+        self.time_value_lbl = tk.Label(
+            time_box,
+            text=f"⏱ Target Time: {DEFAULT_MAX_TIME_SECONDS:.1f}s",
+            bg="#111111",
+            fg="#00ff66",
+            font=("Consolas", 9, "bold")
+        )
+        self.time_value_lbl.pack(pady=(4, 0))
+
+        self.time_slider = tk.Scale(
+            time_box,
+            from_=0.5,
+            to=10.0,
+            resolution=0.5,
+            orient=tk.HORIZONTAL,
+            variable=self.time_var,
+            command=self._on_time_changed,
+            bg="#111111",
+            fg="#cccccc",
+            troughcolor="#262626",
+            highlightthickness=0,
+            showvalue=False,
+            sliderlength=16,
+            length=375,
+            cursor="hand2"
+        )
+        self.time_slider.pack(padx=12, pady=(1, 1))
+
+        self.time_hint_lbl = tk.Label(
+            time_box,
+            text=f"Guaranteed Top 3 | Full {DEFAULT_MAX_TIME_SECONDS:.1f}s search | {ENGINE_THREADS} threads",
             bg="#111111",
             fg="#9ca3af",
-            font=("Consolas", 8)
+            font=("Consolas", 7)
         )
-        self.elo_time_hint_lbl.pack(pady=(0, 6))
+        self.time_hint_lbl.pack(pady=(0, 4))
 
+        # --- 1) POSITION EVALUATION BAR CHECKBOX ---
         self.chk_eval = tk.Checkbutton(
             right_frame,
             text="Position Evaluation Bar",
@@ -1282,7 +2435,7 @@ class ChessScreenApp:
             anchor="w",
             cursor="hand2"
         )
-        self.chk_eval.pack(fill="x", padx=14, pady=(4, 0))
+        self.chk_eval.pack(fill="x", padx=14, pady=(0, 0))
 
         self.eval_detail_lbl = tk.Label(
             right_frame,
@@ -1292,11 +2445,89 @@ class ChessScreenApp:
             font=("Consolas", 8),
             anchor="w"
         )
-        self.eval_detail_lbl.pack(fill="x", padx=34, pady=(0, 4))
+        self.eval_detail_lbl.pack(fill="x", padx=34, pady=(0, 3))
 
+        # --- 2) DEDICATED BOOK MOVES CHECKBOX + PANEL ---
+        self.chk_book = tk.Checkbutton(
+            right_frame,
+            text="Book Moves + All Book Arrows",
+            variable=self.show_book_var,
+            command=self._on_toggle_book,
+            bg="#0a0a0a",
+            fg="#10b981",
+            selectcolor="#1f2937",
+            activebackground="#0a0a0a",
+            activeforeground="#34d399",
+            font=("Consolas", 9, "bold"),
+            anchor="w",
+            cursor="hand2"
+        )
+        self.chk_book.pack(fill="x", padx=14, pady=(0, 2))
+
+        self.book_moves_frame = tk.Frame(
+            right_frame,
+            bg="#121212",
+            highlightthickness=1,
+            highlightbackground="#1e3a2f"
+        )
+        self.book_moves_frame.pack(fill="x", padx=12, pady=(0, 6))
+
+        self.book_meta_lbl = tk.Label(
+            self.book_moves_frame,
+            text="Book: Disabled",
+            bg="#161b19",
+            fg="#6b7280",
+            font=("Consolas", 8, "bold"),
+            anchor="w",
+            padx=8,
+            pady=2
+        )
+        self.book_meta_lbl.pack(fill="x")
+
+        book_body = tk.Frame(self.book_moves_frame, bg="#121212")
+        book_body.pack(fill="x", padx=6, pady=3)
+        book_body.columnconfigure(0, weight=1)
+        book_body.rowconfigure(0, weight=1)
+
+        self.book_text = tk.Text(
+            book_body,
+            height=2,
+            bg="#121212",
+            fg="#e5e7eb",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            font=("Consolas", 8),
+            wrap="none",
+            padx=4,
+            pady=1,
+            spacing1=1,
+            spacing3=1,
+            cursor="arrow"
+        )
+        self.book_text.tag_configure("book_top", foreground="#10b981", font=("Consolas", 8, "bold"))
+        self.book_text.tag_configure("book_row", foreground="#38bdf8", font=("Consolas", 8, "bold"))
+        self.book_text.tag_configure("info_text", foreground="#6b7280", font=("Consolas", 8))
+        self.book_text.tag_configure("warn_text", foreground="#fbbf24", font=("Consolas", 8))
+        self.book_text.grid(row=0, column=0, sticky="nsew")
+
+        self.book_scroll = DarkAutoScrollbar(
+            book_body,
+            command=self.book_text.yview,
+            width=7,
+            bg="#121212",
+            thumb_color="#2a2a2e",
+            hover_color="#4b5563",
+        )
+        self.book_scroll.grid(row=0, column=1, sticky="ns", padx=(2, 0))
+        self.book_scroll.grid_remove()
+        self.book_text.config(yscrollcommand=self.book_scroll.set)
+        self._set_book_message("Check 'Book Moves + All Book Arrows' to show all book moves.", "info_text")
+
+        # --- 3) DEDICATED TOP 3 ENGINE MOVES CHECKBOX + PANEL ---
         self.chk_top3 = tk.Checkbutton(
             right_frame,
-            text=f"Top 3 Moves + Arrows (max {MAX_ANALYSIS_SECONDS:.0f}s cap)",
+            text=f"Top 3 Moves + Arrows ({DEFAULT_MAX_TIME_SECONDS:.1f}s)",
             variable=self.show_top3_var,
             command=self._on_toggle_top3,
             bg="#0a0a0a",
@@ -1308,7 +2539,7 @@ class ChessScreenApp:
             anchor="w",
             cursor="hand2"
         )
-        self.chk_top3.pack(fill="x", padx=14, pady=(2, 4))
+        self.chk_top3.pack(fill="x", padx=14, pady=(0, 2))
 
         self.top3_frame = tk.Frame(
             right_frame,
@@ -1316,17 +2547,17 @@ class ChessScreenApp:
             highlightthickness=1,
             highlightbackground="#2a2a2a"
         )
-        self.top3_frame.pack(fill="x", padx=12, pady=(0, 8))
+        self.top3_frame.pack(fill="x", padx=12, pady=(0, 6))
 
         self.top3_meta_lbl = tk.Label(
             self.top3_frame,
-            text="Rank: 1500 Elo | Time: -- (cap 5.0s)",
+            text=f"Rank: 1500 Elo | Time: -- / {DEFAULT_MAX_TIME_SECONDS:.1f}s",
             bg="#18181b",
             fg="#60a5fa",
             font=("Consolas", 8, "bold"),
             anchor="w",
             padx=8,
-            pady=3
+            pady=2
         )
         self.top3_meta_lbl.pack(fill="x")
 
@@ -1338,7 +2569,7 @@ class ChessScreenApp:
             font=("Consolas", 8, "bold"),
             anchor="w"
         )
-        self.side1_header_lbl.pack(fill="x", padx=8, pady=(6, 2))
+        self.side1_header_lbl.pack(fill="x", padx=8, pady=(4, 1))
 
         self.top3_text = tk.Text(
             self.top3_frame,
@@ -1351,7 +2582,7 @@ class ChessScreenApp:
             font=("Consolas", 8),
             wrap="none",
             padx=10,
-            pady=2,
+            pady=1,
             cursor="arrow"
         )
         self.top3_text.tag_configure("rank1", foreground="#f59e0b", font=("Consolas", 8, "bold"))
@@ -1361,20 +2592,20 @@ class ChessScreenApp:
         self.top3_text.tag_configure("info_text", foreground="#6b7280", font=("Consolas", 8))
         self.top3_text.tag_configure("warn_text", foreground="#fbbf24", font=("Consolas", 8))
         self.top3_text.tag_configure("err_text", foreground="#ff5555", font=("Consolas", 8))
-        self.top3_text.pack(fill="x", pady=(0, 6))
-        self._set_top3_message("Check box to calculate & show board arrows.", "info_text")
+        self.top3_text.pack(fill="x", pady=(0, 4))
+        self._set_top3_message("Check box to calculate & show engine arrows.", "info_text")
 
-        # ================= COMPACT HISTORY NAVIGATION & MOVE VERDICT BOX =================
+        # ================= HISTORY NAVIGATION & MOVE VERDICT BOX =================
         sandbox_box = tk.Frame(
             right_frame,
             bg="#121212",
             highlightthickness=1,
             highlightbackground="#2e3b4e"
         )
-        sandbox_box.pack(fill="x", padx=12, pady=(0, 8))
+        sandbox_box.pack(fill="x", padx=12, pady=(0, 6))
 
         nav_btn_row = tk.Frame(sandbox_box, bg="#121212")
-        nav_btn_row.pack(fill="x", padx=8, pady=(8, 4))
+        nav_btn_row.pack(fill="x", padx=8, pady=(6, 4))
 
         self.back_btn = tk.Button(
             nav_btn_row,
@@ -1388,7 +2619,7 @@ class ChessScreenApp:
             relief="flat",
             font=("Consolas", 8, "bold"),
             padx=6,
-            pady=5,
+            pady=3,
             cursor="hand2",
             state="disabled"
         )
@@ -1406,7 +2637,7 @@ class ChessScreenApp:
             relief="flat",
             font=("Consolas", 8, "bold"),
             padx=6,
-            pady=5,
+            pady=3,
             cursor="hand2",
             state="disabled"
         )
@@ -1424,54 +2655,72 @@ class ChessScreenApp:
             relief="flat",
             font=("Consolas", 8, "bold"),
             padx=6,
-            pady=4,
+            pady=3,
             cursor="hand2",
             state="disabled"
         )
-        self.exit_try_btn.pack(fill="x", padx=8, pady=(0, 6))
+        self.exit_try_btn.pack(fill="x", padx=8, pady=(0, 4))
 
         self.move_verdict_lbl = tk.Label(
             sandbox_box,
-            text="Click any piece on the board to test a move,\nor use Backwards / Forwards to review history.",
+            text="Click any piece or book move to test a move,\nor use Backwards / Forwards to review history.",
             bg="#121212",
             fg="#9ca3af",
-            font=("Consolas", 9),
+            font=("Consolas", 8),
             justify="left",
             anchor="nw",
-            wraplength=385,
-            height=3
+            wraplength=390,
+            height=2
         )
-        self.move_verdict_lbl.pack(fill="x", padx=8, pady=(2, 8))
+        self.move_verdict_lbl.pack(fill="x", padx=8, pady=(0, 6))
 
-        # ================= PGN NOTATION BOX (DARK AUTO-HIDING SCROLLBAR) =================
+        # ================= COMPACT PGN NOTATION BOX =================
         pgn_box = tk.Frame(
             right_frame,
             bg="#121212",
             highlightthickness=1,
             highlightbackground="#262626"
         )
-        pgn_box.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        pgn_box.pack(fill="x", padx=12, pady=(0, 8))
 
-        pgn_header = tk.Label(
-            pgn_box,
+        pgn_header_bar = tk.Frame(pgn_box, bg="#18181b")
+        pgn_header_bar.pack(fill="x")
+
+        tk.Label(
+            pgn_header_bar,
             text="PGN NOTATION:",
             bg="#18181b",
             fg="#9ca3af",
             font=("Consolas", 8, "bold"),
             anchor="w",
             padx=8,
-            pady=3
+            pady=2
+        ).pack(side=tk.LEFT)
+
+        self.copy_pgn_btn = tk.Button(
+            pgn_header_bar,
+            text="📋 Copy",
+            command=self._copy_pgn_to_clipboard,
+            bg="#18181b",
+            fg="#60a5fa",
+            activebackground="#27272a",
+            activeforeground="#93c5fd",
+            relief="flat",
+            font=("Consolas", 7, "bold"),
+            padx=6,
+            pady=1,
+            cursor="hand2"
         )
-        pgn_header.pack(fill="x")
+        self.copy_pgn_btn.pack(side=tk.RIGHT, padx=4)
 
         pgn_body = tk.Frame(pgn_box, bg="#0d0d0d")
-        pgn_body.pack(fill="both", expand=True, padx=6, pady=6)
-        pgn_body.rowconfigure(0, weight=1)
+        pgn_body.pack(fill="x", padx=6, pady=4)
         pgn_body.columnconfigure(0, weight=1)
+        pgn_body.rowconfigure(0, weight=1)
 
         self.pgn_text = tk.Text(
             pgn_body,
-            height=4,
+            height=3,
             bg="#0d0d0d",
             fg="#00ff66",
             insertbackground="#ffffff",
@@ -1480,7 +2729,7 @@ class ChessScreenApp:
             font=("Consolas", 8),
             wrap="word",
             padx=4,
-            pady=4,
+            pady=1,
         )
         self.pgn_text.grid(row=0, column=0, sticky="nsew")
 
@@ -1496,6 +2745,17 @@ class ChessScreenApp:
         self.pgn_scroll.grid_remove()
 
         self.pgn_text.config(yscrollcommand=self.pgn_scroll.set)
+
+    def _copy_pgn_to_clipboard(self):
+        game = chess.pgn.Game.from_board(self.board)
+        exporter = chess.pgn.StringExporter(headers=False, variations=False, comments=False)
+        pgn_str = game.accept(exporter).strip()
+        if not pgn_str or pgn_str == "*":
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(pgn_str)
+        self.copy_pgn_btn.config(text="✓ Copied", fg="#00ff66")
+        self.root.after(1500, lambda: self.copy_pgn_btn.config(text="📋 Copy", fg="#60a5fa"))
 
     def _clear_preview_canvases(self):
         for cv in self.preview_canvases:
@@ -1547,7 +2807,6 @@ class ChessScreenApp:
             )
             self.preview_canvases.append(mini_cv)
             self.top3_text.window_create(tk.END, window=mini_cv, align="center")
-
             self.top3_text.insert(tk.END, f" {san} [{sc}] -> {ln}", "move_text")
 
         self.top3_text.config(state="disabled")
@@ -1565,7 +2824,7 @@ class ChessScreenApp:
 
         if mode == "side":
             panel_bg = "#0a0a0a"
-            col_w = self.side_bar_width - 12  # 204px inner width + 12px right margin
+            col_w = self.side_bar_width - 12
             self.controls_frame.config(
                 bg=panel_bg,
                 width=col_w,
@@ -1622,11 +2881,11 @@ class ChessScreenApp:
 
         eval_space = (self.eval_bar_width + 10) if self.show_eval_var.get() else 0
         margin = 12
+        opening_h = self.opening_bar_height_est
 
-        size_top = max(260, min(left_w - eval_space - margin, left_h - self.top_bar_height_est - margin))
-        size_side = max(260, min(left_w - self.side_bar_width - eval_space - margin, left_h - margin))
+        size_top = max(240, min(left_w - eval_space - margin, left_h - self.top_bar_height_est - opening_h - margin))
+        size_side = max(240, min(left_w - self.side_bar_width - eval_space - margin, left_h - opening_h - margin))
 
-        # Switch to side column only when doing so genuinely makes the board larger
         if self.controls_layout_mode == "side":
             desired_mode = "side" if size_side >= size_top + 2 else "top"
         else:
@@ -1649,12 +2908,12 @@ class ChessScreenApp:
 
     # ================= HISTORY NAVIGATION & SANDBOX LOGIC =================
     def _on_left_key(self, event):
-        if isinstance(event.widget, (tk.Entry, tk.Text)):
+        if isinstance(event.widget, (tk.Entry, tk.Text, ttk.Combobox)):
             return
         self._step_backwards()
 
     def _on_right_key(self, event):
-        if isinstance(event.widget, (tk.Entry, tk.Text)):
+        if isinstance(event.widget, (tk.Entry, tk.Text, ttk.Combobox)):
             return
         self._step_forwards()
 
@@ -1693,13 +2952,12 @@ class ChessScreenApp:
         self.legal_targets_for_selected = set()
         self.top3_arrows = []
 
-        self._draw_board()
         self._update_pgn_display()
         self._update_nav_buttons()
 
         status_txt, status_col = self._format_sync_status_text()
         self.status_label.config(text=status_txt, fg=status_col)
-        self._request_engine_analysis()
+        self._sync_book_and_engine_state(run_engine=True)
 
     def _step_backwards(self):
         if self.sandbox_mode and len(self.sandbox_moves) > 0:
@@ -1724,7 +2982,7 @@ class ChessScreenApp:
             self.view_ply -= 1
             self.manual_history_nav = (self.view_ply != self.last_html_ply)
             self.move_verdict_lbl.config(
-                text=f"Match history: move {self.view_ply}/{len(self.match_moves)}.\nClick any piece on the board to test an alternative.",
+                text=f"Match history: move {self.view_ply}/{len(self.match_moves)}.\nClick any piece or book move to test an alternative.",
                 fg="#9ca3af"
             )
             self._rebuild_and_evaluate_current_view()
@@ -1736,7 +2994,7 @@ class ChessScreenApp:
             self.view_ply += 1
             self.manual_history_nav = (self.view_ply != self.last_html_ply)
             self.move_verdict_lbl.config(
-                text=f"Match history: move {self.view_ply}/{len(self.match_moves)}.\nClick any piece on the board to test an alternative.",
+                text=f"Match history: move {self.view_ply}/{len(self.match_moves)}.\nClick any piece or book move to test an alternative.",
                 fg="#9ca3af"
             )
             self._rebuild_and_evaluate_current_view()
@@ -1762,11 +3020,10 @@ class ChessScreenApp:
             self.board = chess.Board()
 
         self.move_verdict_lbl.config(
-            text="Returned to live match.\nClick any piece to test a move.",
+            text="Returned to live match.\nClick any piece or book move to test a move.",
             fg="#9ca3af"
         )
 
-        self._draw_board()
         self._update_pgn_display()
         self._update_nav_buttons()
         status_txt, status_col = self._format_sync_status_text()
@@ -1775,7 +3032,7 @@ class ChessScreenApp:
         if self.last_dom_payload:
             self._on_html_board_update(self.last_dom_payload, force_analysis=True)
         else:
-            self._request_engine_analysis()
+            self._sync_book_and_engine_state(run_engine=True)
 
     def _on_board_click(self, event):
         sq_dim = self.board_size / 8.0
@@ -1795,28 +3052,7 @@ class ChessScreenApp:
                 move = chess.Move(self.selected_square, clicked_sq, promotion=chess.QUEEN)
 
             if move in self.board.legal_moves:
-                if not self.sandbox_mode:
-                    self.sandbox_mode = True
-                    self.sandbox_base_ply = self.view_ply
-                    self.sandbox_moves = []
-
-                board_before = self.board.copy(stack=False)
-                san_move = board_before.san(move)
-                self.board.push(move)
-                self.sandbox_moves.append(move)
-                board_after = self.board.copy(stack=False)
-
-                self.selected_square = None
-                self.legal_targets_for_selected = set()
-                self.top3_arrows = []
-                self._draw_board()
-                self._update_pgn_display()
-                self._update_nav_buttons()
-
-                status_txt, status_col = self._format_sync_status_text()
-                self.status_label.config(text=status_txt, fg=status_col)
-
-                self._evaluate_tried_move(board_before, board_after, move, san_move)
+                self._execute_test_move(move)
                 return
 
         piece = self.board.piece_at(clicked_sq)
@@ -1831,126 +3067,135 @@ class ChessScreenApp:
 
         self._draw_board()
 
+    def _run_search_locked(self, board_obj, time_slice, gen, collect_pvs=False, target_depth=None):
+        """
+        Runs a clean UCI search bounded by the exact time_slice (in seconds).
+        Avoids artificial low depth cutoffs so the full timer budget is respected.
+        """
+        if self.analysis_generation != gen:
+            return None, []
+
+        limit_kwargs = {"time": max(0.05, time_slice)}
+        if target_depth is not None:
+            limit_kwargs["depth"] = target_depth
+        limit = chess.engine.Limit(**limit_kwargs)
+
+        latest_info = None
+        seen_root_moves = []
+
+        with self.engine.analysis(board_obj, limit) as analysis:
+            for info in analysis:
+                if "score" in info:
+                    latest_info = info
+                if collect_pvs and info.get("pv"):
+                    mv0 = info["pv"][0]
+                    if mv0 in board_obj.legal_moves and mv0 not in seen_root_moves:
+                        seen_root_moves.append(mv0)
+                if self.analysis_generation != gen:
+                    analysis.stop()
+                    break
+
+        return latest_info, seen_root_moves
+
     def _evaluate_tried_move(self, board_before, board_after, played_move, san_move):
         if not self._ensure_engine_ready():
+            self._sync_book_and_engine_state(run_engine=True)
             return
 
         self.analysis_generation += 1
         gen = self.analysis_generation
-        prof = self._get_rank_profile()
+        style_tag = self._get_active_style_tag()
 
         self.move_verdict_lbl.config(
-            text=f"⏳ Analyzing {san_move} at {prof['rank_short']}...",
+            text=f"⏳ Analyzing {san_move}{style_tag}...",
             fg="#fbbf24"
         )
 
         def worker():
-            t0 = time.monotonic()
             mover_is_white = (board_before.turn == chess.WHITE)
+            t0 = time.monotonic()
+            verdict_msg = None
+            verdict_color = "#9ca3af"
+
             with self.engine_lock:
-                if self.engine is None or self.analysis_generation != gen:
-                    return
-                try:
-                    self._apply_rodent_difficulty_locked(force_max=True)
+                if self.engine is not None and self.analysis_generation == gen:
+                    try:
+                        self._apply_rodent_difficulty_locked(force_max=True)
 
-                    info_before = self.engine.analyse(
-                        board_before,
-                        chess.engine.Limit(time=0.55, depth=12)
-                    )
-                    best_pv = info_before.get("pv", [])
-                    best_move = best_pv[0] if best_pv else None
-                    best_san = board_before.san(best_move) if best_move else "-"
-
-                    score_before_obj = info_before["score"].pov(mover_is_white)
-                    cp_before = score_before_obj.score(mate_score=10000) / 100.0
-
-                    if board_after.is_checkmate():
-                        cp_after = 100.0
-                    elif board_after.is_stalemate() or board_after.is_insufficient_material():
-                        cp_after = 0.0
-                    else:
-                        info_after = self.engine.analyse(
-                            board_after,
-                            chess.engine.Limit(time=0.55, depth=12)
+                        info_before = self.engine.analyse(
+                            board_before,
+                            chess.engine.Limit(time=0.20, depth=10)
                         )
-                        score_after_obj = info_after["score"].pov(mover_is_white)
-                        cp_after = score_after_obj.score(mate_score=10000) / 100.0
+                        if self.analysis_generation == gen and info_before and "score" in info_before:
+                            best_pv = info_before.get("pv", [])
+                            best_move = best_pv[0] if best_pv else None
+                            best_san = board_before.san(best_move) if best_move else "-"
 
-                    self._apply_rodent_difficulty_locked(force_max=False)
-                except Exception as e:
-                    self.root.after(0, lambda: self.move_verdict_lbl.config(
-                        text=f"Evaluation error: {e}", fg="#ff5555"
-                    ))
-                    return
+                            score_before_obj = info_before["score"].pov(mover_is_white)
+                            cp_before = score_before_obj.score(mate_score=10000) / 100.0
 
-            if self.analysis_generation != gen:
-                return
+                            if board_after.is_checkmate():
+                                cp_after = 100.0
+                            elif board_after.is_stalemate() or board_after.is_insufficient_material():
+                                cp_after = 0.0
+                            else:
+                                info_after = self.engine.analyse(
+                                    board_after,
+                                    chess.engine.Limit(time=0.20, depth=10)
+                                )
+                                score_after_obj = info_after["score"].pov(mover_is_white)
+                                cp_after = score_after_obj.score(mate_score=10000) / 100.0
 
-            elapsed = time.monotonic() - t0
-            loss = max(0.0, cp_before - cp_after)
-            is_top_choice = (best_move == played_move)
+                            elapsed = time.monotonic() - t0
+                            loss = max(0.0, cp_before - cp_after)
+                            is_top_choice = (best_move == played_move)
 
-            if is_top_choice or loss <= 0.15:
-                verdict = f"🌟 {san_move}: BEST MOVE!"
-                color = "#00ff66"
-                detail = f"Eval: {cp_after:+.2f} | Time: {elapsed:.1f}s"
-            elif loss <= 0.35:
-                verdict = f"✅ {san_move}: Excellent move!"
-                color = "#4ade80"
-                detail = f"Diff: -{loss:.2f} | Best: {best_san} ({elapsed:.1f}s)"
-            elif loss <= 0.75:
-                verdict = f"👍 {san_move}: Good move."
-                color = "#a3e635"
-                detail = f"Diff: -{loss:.2f} | Better: {best_san} ({elapsed:.1f}s)"
-            elif loss <= 1.50:
-                verdict = f"⚠️ {san_move}: Inaccuracy!"
-                color = "#fbbf24"
-                detail = f"Loss: -{loss:.2f} | Better: {best_san} ({elapsed:.1f}s)"
-            elif loss <= 3.00:
-                verdict = f"❌ {san_move}: Mistake!"
-                color = "#fb923c"
-                detail = f"Loss: -{loss:.2f} | Best was: {best_san} ({elapsed:.1f}s)"
-            else:
-                verdict = f"💥 {san_move}: BLUNDER!"
-                color = "#ef4444"
-                detail = f"Loss: -{loss:.2f} | Best was: {best_san} ({elapsed:.1f}s)"
+                            if is_top_choice or loss <= 0.15:
+                                verdict = f"🌟 {san_move}: BEST MOVE!"
+                                verdict_color = "#00ff66"
+                                detail = f"Eval: {cp_after:+.2f} | Time: {elapsed:.1f}s"
+                            elif loss <= 0.35:
+                                verdict = f"✅ {san_move}: Excellent move!"
+                                verdict_color = "#4ade80"
+                                detail = f"Diff: -{loss:.2f} | Best: {best_san} ({elapsed:.1f}s)"
+                            elif loss <= 0.75:
+                                verdict = f"👍 {san_move}: Good move."
+                                verdict_color = "#a3e635"
+                                detail = f"Diff: -{loss:.2f} | Better: {best_san} ({elapsed:.1f}s)"
+                            elif loss <= 1.50:
+                                verdict = f"⚠️ {san_move}: Inaccuracy!"
+                                verdict_color = "#fbbf24"
+                                detail = f"Loss: -{loss:.2f} | Better: {best_san} ({elapsed:.1f}s)"
+                            elif loss <= 3.00:
+                                verdict = f"❌ {san_move}: Mistake!"
+                                verdict_color = "#fb923c"
+                                detail = f"Loss: -{loss:.2f} | Best was: {best_san} ({elapsed:.1f}s)"
+                            else:
+                                verdict = f"💥 {san_move}: BLUNDER!"
+                                verdict_color = "#ef4444"
+                                detail = f"Loss: -{loss:.2f} | Best was: {best_san} ({elapsed:.1f}s)"
+
+                            verdict_msg = f"{verdict}\n{detail}"
+                    except Exception as e:
+                        verdict_msg = f"Evaluation error: {e}"
+                        verdict_color = "#ff5555"
+                        self._restart_engine_locked()
+                    finally:
+                        self._apply_rodent_difficulty_locked(force_max=False)
 
             def finish_verdict():
                 if self.analysis_generation != gen:
                     return
-                self.move_verdict_lbl.config(text=f"{verdict}\n{detail}", fg=color)
-                self._request_engine_analysis()
+                if verdict_msg:
+                    self.move_verdict_lbl.config(text=verdict_msg, fg=verdict_color)
+                # Always launch Top 3 Moves / Evaluation for the new out-of-book position
+                self._sync_book_and_engine_state(run_engine=True)
 
             self.root.after(0, finish_verdict)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ================= DISTINCT TOP 3 MOVES ALGORITHM =================
-    def _rank_candidate_moves(self, board_obj, exclude_move=None):
-        scored = []
-        for mv in board_obj.legal_moves:
-            if exclude_move is not None and mv == exclude_move:
-                continue
-            priority = 0
-            if board_obj.is_capture(mv):
-                priority += 40
-            if mv.promotion:
-                priority += 50
-            if board_obj.gives_check(mv):
-                priority += 35
-            if board_obj.is_castling(mv):
-                priority += 30
-            to_file = chess.square_file(mv.to_square)
-            to_rank = chess.square_rank(mv.to_square)
-            if 2 <= to_file <= 5 and 2 <= to_rank <= 5:
-                priority += 15
-            piece = board_obj.piece_at(mv.from_square)
-            if piece and piece.piece_type in (chess.KNIGHT, chess.BISHOP):
-                priority += 10
-            scored.append((priority, mv))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [mv for _, mv in scored]
-
+    # ================= PURE ENGINE TOP 3 MOVES =================
     def _format_score_white(self, score_obj):
         white_score = score_obj.white()
         if white_score.is_mate():
@@ -1966,101 +3211,211 @@ class ChessScreenApp:
             sort_cp = raw_cp
         return eval_str, eval_cp, sort_cp
 
-    def _compute_top3_distinct_locked(
-        self, board_obj, gen, t_start, primary_t, refine_t, screen_t, max_cand, max_depth
+    def _quick_move_order_score(self, board_obj, mv):
+        score = 0
+        if board_obj.is_capture(mv):
+            score += 45
+        if mv.promotion:
+            score += 70
+        if board_obj.gives_check(mv):
+            score += 35
+        to_sq = mv.to_square
+        if chess.square_file(to_sq) in (2, 3, 4, 5) and chess.square_rank(to_sq) in (2, 3, 4, 5):
+            score += 12
+        return score
+
+    def _evaluate_child_move_locked(self, board_obj, mv, time_slice, gen, depth_limit=None):
+        mover_is_white = (board_obj.turn == chess.WHITE)
+        san_cand = board_obj.san(mv)
+        b_child = board_obj.copy(stack=False)
+        b_child.push(mv)
+
+        if b_child.is_checkmate():
+            mate_str = "#M1" if mover_is_white else "#M-1"
+            mate_cp = 10.0 if mover_is_white else -10.0
+            return (100000, san_cand, mate_str, san_cand, mate_cp, mv), 1
+
+        if b_child.is_stalemate() or b_child.is_insufficient_material():
+            return (0, san_cand, "0.0", san_cand, 0.0, mv), 1
+
+        info, _ = self._run_search_locked(
+            b_child, time_slice, gen, collect_pvs=False, target_depth=depth_limit
+        )
+        if info and "score" in info:
+            ev_str, ev_cp, white_sort_cp = self._format_score_white(info["score"])
+            mover_sort_cp = white_sort_cp if mover_is_white else -white_sort_cp
+
+            line_sans = [san_cand]
+            tb = b_child.copy(stack=False)
+            for m in info.get("pv", [])[:2]:
+                if m in tb.legal_moves:
+                    line_sans.append(tb.san(m))
+                    tb.push(m)
+                else:
+                    break
+
+            return (
+                mover_sort_cp,
+                san_cand,
+                ev_str,
+                " ".join(line_sans),
+                ev_cp,
+                mv,
+            ), info.get("depth", 0)
+
+        return (-50000, san_cand, "0.0", san_cand, 0.0, mv), 0
+
+    def _compute_top3_guaranteed_locked(
+        self, board_obj, gen, t_start, eff_budget
     ):
+        """
+        100% guarantees 3 distinct pure-engine moves (whenever >= 3 legal moves exist)
+        and strictly respects the full `eff_budget` timer duration.
+        """
         legal_moves = list(board_obj.legal_moves)
         if not legal_moves:
             return [], 0
 
         mover_is_white = (board_obj.turn == chess.WHITE)
+        target_k = min(3, len(legal_moves))
         max_depth_reached = 0
-        results = []
 
-        rem = MAX_ANALYSIS_SECONDS - (time.monotonic() - t_start) - 0.15
-        if rem <= 0.15 or self.analysis_generation != gen:
-            return [], 0
+        # Fast path: Native MultiPV=3 bounded purely by the user's timer (eff_budget)
+        if self.engine and "MultiPV" in self.engine.options:
+            try:
+                mpv_infos = self.engine.analyse(
+                    board_obj,
+                    chess.engine.Limit(time=max(0.25, eff_budget)),
+                    multipv=target_k
+                )
+                if isinstance(mpv_infos, dict):
+                    mpv_infos = [mpv_infos]
+                if self.analysis_generation != gen:
+                    return [], 0
 
-        t1 = min(primary_t, max(0.15, rem))
-        info1 = self.engine.analyse(board_obj, chess.engine.Limit(time=t1, depth=max_depth))
-        pv1 = info1.get("pv", [])
-        if not pv1 or "score" not in info1:
-            return [], 0
+                results = []
+                seen_mvs = set()
+                for info in mpv_infos:
+                    pv = info.get("pv", [])
+                    if not pv or "score" not in info:
+                        continue
+                    mv0 = pv[0]
+                    if mv0 not in board_obj.legal_moves or mv0 in seen_mvs:
+                        continue
+                    seen_mvs.add(mv0)
+                    max_depth_reached = max(max_depth_reached, info.get("depth", 0))
+                    ev_str, ev_cp, _ = self._format_score_white(info["score"])
+                    tb = board_obj.copy(stack=False)
+                    line_sans = []
+                    for m in pv[:3]:
+                        if m in tb.legal_moves:
+                            line_sans.append(tb.san(m))
+                            tb.push(m)
+                        else:
+                            break
+                    results.append((len(results) + 1, board_obj.san(mv0), ev_str, " ".join(line_sans), ev_cp, mv0))
+                    if len(results) >= target_k:
+                        break
 
-        best_mv1 = pv1[0]
-        max_depth_reached = max(max_depth_reached, info1.get("depth", 0))
-        eval_str1, eval_cp1, _ = self._format_score_white(info1["score"])
+                if len(results) >= target_k:
+                    return results, max_depth_reached
+            except Exception:
+                pass
 
-        temp_b = board_obj.copy(stack=False)
-        line1_sans = []
-        for m in pv1[:3]:
-            line1_sans.append(temp_b.san(m))
-            temp_b.push(m)
-        results.append((1, board_obj.san(best_mv1), eval_str1, " ".join(line1_sans), eval_cp1, best_mv1))
+        # Fallback path if MultiPV is unavailable: distribute full eff_budget across 3 stages
+        stage1_time = max(0.15, eff_budget * 0.35)
+        info_root, root_seen_moves = self._run_search_locked(
+            board_obj,
+            time_slice=stage1_time,
+            gen=gen,
+            collect_pvs=True
+        )
+        if self.analysis_generation != gen:
+            return [], max_depth_reached
+
+        evaluated_map = {}  # chess.Move -> entry tuple
+        if info_root and "score" in info_root and info_root.get("pv"):
+            mv0 = info_root["pv"][0]
+            if mv0 in board_obj.legal_moves:
+                max_depth_reached = max(max_depth_reached, info_root.get("depth", 0))
+                ev_str, ev_cp, white_sort_cp = self._format_score_white(info_root["score"])
+                mover_sort_cp = white_sort_cp if mover_is_white else -white_sort_cp
+                tb = board_obj.copy(stack=False)
+                line_sans = []
+                for m in info_root["pv"][:3]:
+                    if m in tb.legal_moves:
+                        line_sans.append(tb.san(m))
+                        tb.push(m)
+                    else:
+                        break
+                evaluated_map[mv0] = (
+                    mover_sort_cp,
+                    board_obj.san(mv0),
+                    ev_str,
+                    " ".join(line_sans),
+                    ev_cp,
+                    mv0,
+                )
 
         if len(legal_moves) == 1:
-            return results, max_depth_reached
+            if not evaluated_map:
+                entry, d = self._evaluate_child_move_locked(board_obj, legal_moves[0], max(0.20, eff_budget), gen)
+                evaluated_map[legal_moves[0]] = entry
+                max_depth_reached = max(max_depth_reached, d)
+            only = list(evaluated_map.values())[0]
+            return [(1, only[1], only[2], only[3], only[4], only[5])], max_depth_reached
 
-        candidates = self._rank_candidate_moves(board_obj, exclude_move=best_mv1)[:max_cand]
-        screened = []
+        remaining_moves = [m for m in legal_moves if m not in evaluated_map]
+        remaining_moves.sort(
+            key=lambda m: (1 if m in root_seen_moves else 0, self._quick_move_order_score(board_obj, m)),
+            reverse=True
+        )
+        candidate_pool = remaining_moves[:14]
 
-        for mv in candidates:
+        screen_budget = max(0.20, eff_budget * 0.30)
+        per_screen_slice = max(0.025, screen_budget / max(1, len(candidate_pool)))
+
+        screen_results = []
+        for mv in candidate_pool:
             if self.analysis_generation != gen:
-                return results, max_depth_reached
-            rem = MAX_ANALYSIS_SECONDS - (time.monotonic() - t_start) - 0.25
-            if rem <= 0.20:
-                break
-
-            b_child = board_obj.copy(stack=False)
-            b_child.push(mv)
-            if b_child.is_checkmate():
-                screened.append((100000, mv, []))
-                continue
-
-            st = min(screen_t, max(0.03, rem))
-            info_c = self.engine.analyse(b_child, chess.engine.Limit(time=st, depth=min(6, max_depth)))
-            if "score" in info_c:
-                pov_sc = info_c["score"].pov(mover_is_white).score(mate_score=10000)
-                screened.append((pov_sc, mv, info_c.get("pv", [])))
-
-        screened.sort(key=lambda item: item[0], reverse=True)
-
-        for _, mv_alt, fallback_pv in screened[:2]:
-            if self.analysis_generation != gen:
-                return results, max_depth_reached
-            rem = MAX_ANALYSIS_SECONDS - (time.monotonic() - t_start) - 0.15
-            if rem <= 0.15:
-                break
-
-            b_child = board_obj.copy(stack=False)
-            b_child.push(mv_alt)
-            san_alt = board_obj.san(mv_alt)
-
-            if b_child.is_checkmate():
-                mate_str = "#M1" if mover_is_white else "#M-1"
-                mate_cp = 10.0 if mover_is_white else -10.0
-                results.append((len(results) + 1, san_alt, mate_str, san_alt, mate_cp, mv_alt))
-                continue
-
-            rt = min(refine_t, max(0.15, rem))
-            info_r = self.engine.analyse(
-                b_child,
-                chess.engine.Limit(time=rt, depth=max(6, max_depth - 1))
+                return [], max_depth_reached
+            entry, d = self._evaluate_child_move_locked(
+                board_obj, mv, per_screen_slice, gen
             )
-            max_depth_reached = max(max_depth_reached, info_r.get("depth", 0))
-            if "score" in info_r:
-                ev_str, ev_cp, _ = self._format_score_white(info_r["score"])
-                pv_r = info_r.get("pv", fallback_pv)
-                line_sans = [san_alt]
-                temp_b = b_child.copy(stack=False)
-                for m in pv_r[:2]:
-                    line_sans.append(temp_b.san(m))
-                    temp_b.push(m)
-                results.append((len(results) + 1, san_alt, ev_str, " ".join(line_sans), ev_cp, mv_alt))
+            max_depth_reached = max(max_depth_reached, d)
+            screen_results.append(entry)
 
+        screen_results.sort(key=lambda item: item[0], reverse=True)
+
+        top_verify_candidates = [item[5] for item in screen_results[:target_k]]
+        remaining_time = max(0.20, eff_budget - (time.monotonic() - t_start))
+        per_verify_slice = max(0.08, remaining_time / max(1, len(top_verify_candidates)))
+
+        for mv in top_verify_candidates:
+            if self.analysis_generation != gen:
+                return [], max_depth_reached
+            entry, d = self._evaluate_child_move_locked(
+                board_obj, mv, per_verify_slice, gen
+            )
+            max_depth_reached = max(max_depth_reached, d)
+            evaluated_map[mv] = entry
+
+        for entry in screen_results:
+            if len(evaluated_map) >= target_k:
+                break
+            if entry[5] not in evaluated_map:
+                evaluated_map[entry[5]] = entry
+
+        final_entries = list(evaluated_map.values())
+        final_entries.sort(key=lambda item: item[0], reverse=True)
+
+        results = [
+            (i + 1, san, ev_str, line_txt, ev_cp, mv0)
+            for i, (_, san, ev_str, line_txt, ev_cp, mv0) in enumerate(final_entries[:target_k])
+        ]
         return results, max_depth_reached
 
-    # ================= EVALUATION & TOP 3 (5S CAP) =================
+    # ================= EVALUATION & TOP 3 =================
     def _on_toggle_eval_bar(self):
         if self.show_eval_var.get():
             if not self._ensure_engine_ready():
@@ -2069,26 +3424,28 @@ class ChessScreenApp:
             self.eval_canvas.pack(side=tk.LEFT, padx=(8, 0))
             self._recalculate_layout_and_board()
             self._draw_eval_bar()
-            self._request_engine_analysis()
+            self._sync_book_and_engine_state(run_engine=True)
         else:
             self.eval_canvas.pack_forget()
             self._recalculate_layout_and_board()
             self.eval_detail_lbl.config(text="Evaluation: disabled", fg="#777777")
 
     def _on_toggle_top3(self):
+        cap_sec = self._get_max_time_cap()
         if self.show_top3_var.get():
             if not self._ensure_engine_ready():
                 self.show_top3_var.set(False)
                 return
-            self._request_engine_analysis()
+            self._sync_book_and_engine_state(run_engine=True)
         else:
             self.top3_arrows = []
             self._draw_board()
+            style_tag = self._get_active_style_tag()
             self.top3_meta_lbl.config(
-                text=f"Rank: {self._get_rank_profile()['rank_short']} | Time: -- (cap {MAX_ANALYSIS_SECONDS:.0f}s)",
+                text=f"Rank: {self._get_rank_profile()['rank_short']}{style_tag} | Time: -- ({cap_sec:.1f}s)",
                 fg="#60a5fa"
             )
-            self._set_top3_message("Check box to calculate & show board arrows.", "info_text")
+            self._set_top3_message("Check box to calculate & show engine arrows.", "info_text")
 
     def _ensure_engine_ready(self):
         if self.engine is not None:
@@ -2118,33 +3475,80 @@ class ChessScreenApp:
         white_h = int(h * white_ratio)
         black_h = h - white_h
 
-        self.eval_canvas.create_rectangle(0, 0, w, black_h, fill="#262626", outline="")
-        self.eval_canvas.create_rectangle(0, black_h, w, h, fill="#f3f4f6", outline="")
-        self.eval_canvas.create_line(0, h // 2, w, h // 2, fill="#ef4444", width=1)
+        if self.flipped:
+            # User is playing as BLACK -> Black bar at the BOTTOM, White bar at the TOP
+            self.eval_canvas.create_rectangle(0, 0, w, white_h, fill="#f3f4f6", outline="")
+            self.eval_canvas.create_rectangle(0, white_h, w, h, fill="#262626", outline="")
+            self.eval_canvas.create_line(0, h // 2, w, h // 2, fill="#ef4444", width=1)
 
-        if self.current_eval_cp >= 0:
-            self.eval_canvas.create_text(
-                w // 2, h - 14,
-                text=self.current_eval_text,
-                font=("Consolas", 8, "bold"),
-                fill="#111111"
-            )
+            if self.current_eval_cp < 0:
+                self.eval_canvas.create_text(
+                    w // 2, h - 14,
+                    text=self.current_eval_text,
+                    font=("Consolas", 8, "bold"),
+                    fill="#ffffff"
+                )
+            else:
+                self.eval_canvas.create_text(
+                    w // 2, 14,
+                    text=self.current_eval_text,
+                    font=("Consolas", 8, "bold"),
+                    fill="#111111"
+                )
         else:
-            self.eval_canvas.create_text(
-                w // 2, 14,
-                text=self.current_eval_text,
-                font=("Consolas", 8, "bold"),
-                fill="#ffffff"
-            )
+            # User is playing as WHITE -> White bar at the BOTTOM, Black bar at the TOP
+            self.eval_canvas.create_rectangle(0, 0, w, black_h, fill="#262626", outline="")
+            self.eval_canvas.create_rectangle(0, black_h, w, h, fill="#f3f4f6", outline="")
+            self.eval_canvas.create_line(0, h // 2, w, h // 2, fill="#ef4444", width=1)
 
-    def _request_engine_analysis(self):
+            if self.current_eval_cp >= 0:
+                self.eval_canvas.create_text(
+                    w // 2, h - 14,
+                    text=self.current_eval_text,
+                    font=("Consolas", 8, "bold"),
+                    fill="#111111"
+                )
+            else:
+                self.eval_canvas.create_text(
+                    w // 2, 14,
+                    text=self.current_eval_text,
+                    font=("Consolas", 8, "bold"),
+                    fill="#ffffff"
+                )
+
+    def _request_engine_analysis(self, skip_top3=False):
         if self.engine is None:
             return
-        if not (self.show_eval_var.get() or self.show_top3_var.get()):
+
+        want_top3 = self.show_top3_var.get() and not skip_top3
+        want_eval = self.show_eval_var.get()
+
+        if not (want_eval or want_top3):
             return
+
         if not self.board.is_valid():
-            if self.show_top3_var.get():
-                self._set_top3_message("Invalid board position.", "err_text")
+            if want_top3:
+                self._set_top3_message("Waiting for stable board position...", "info_text")
+            return
+
+        if self.board.is_game_over():
+            self.top3_arrows = []
+            self._draw_board()
+            if self.board.is_checkmate():
+                winner = "Black" if self.board.turn == chess.WHITE else "White"
+                msg = f"Checkmate! {winner} wins."
+                self.current_eval_cp = -10.0 if self.board.turn == chess.WHITE else 10.0
+                self.current_eval_text = "#M0"
+            else:
+                msg = "Game over (Draw / Stalemate)."
+                self.current_eval_cp = 0.0
+                self.current_eval_text = "0.0"
+
+            if want_eval:
+                self._draw_eval_bar()
+                self.eval_detail_lbl.config(text=msg, fg="#00ff66")
+            if want_top3:
+                self._set_top3_message(msg, "info_text")
             return
 
         self.analysis_generation += 1
@@ -2153,59 +3557,60 @@ class ChessScreenApp:
 
         board_snapshot = self.board.copy(stack=False)
         fen_snapshot = board_snapshot.fen()
-        want_top3 = self.show_top3_var.get()
         prof = self._get_rank_profile()
-        est_sec = prof["est_top3"] if want_top3 else prof["est_eval"]
-        t_start = time.monotonic()
+        style_tag = self._get_active_style_tag()
+        ui_start = time.monotonic()
 
         active_is_white = (board_snapshot.turn == chess.WHITE)
         if active_is_white:
-            self.side1_header_lbl.config(text="⚪ WHITE (to move):", fg="#f8fafc")
+            self.side1_header_lbl.config(text=f"⚪ WHITE{style_tag} (to move):", fg="#f8fafc")
         else:
-            self.side1_header_lbl.config(text="⚫ BLACK (to move):", fg="#fbbf24")
+            self.side1_header_lbl.config(text=f"⚫ BLACK{style_tag} (to move):", fg="#fbbf24")
 
         if want_top3:
             self.top3_meta_lbl.config(
-                text=f"⏳ {prof['rank_short']} | 0.0s / cap {MAX_ANALYSIS_SECONDS:.0f}s (est. ~{est_sec:.1f}s)",
+                text=f"⏳ {prof['rank_short']}{style_tag} | 0.0s ({prof['cap_sec']:.1f}s)",
                 fg="#fbbf24"
             )
-            self._set_top3_message("Calculating top 3 moves...", "warn_text")
+            self._set_top3_message("Calculating all 3 best engine moves...", "warn_text")
 
-        if self.show_eval_var.get():
+        if want_eval:
             self.eval_detail_lbl.config(
-                text=f"Evaluating ({prof['rank_short']}): calculating...",
+                text=f"Evaluating ({prof['rank_short']}{style_tag}): calculating...",
                 fg="#fbbf24"
             )
 
         def tick_timer():
             if not self.is_analyzing or self.analysis_generation != gen:
                 return
-            elapsed = time.monotonic() - t_start
+            elapsed = time.monotonic() - ui_start
             if want_top3:
                 self.top3_meta_lbl.config(
-                    text=f"⏳ {prof['rank_short']} | {elapsed:.1f}s / cap {MAX_ANALYSIS_SECONDS:.0f}s (est. ~{est_sec:.1f}s)",
+                    text=f"⏳ {prof['rank_short']}{style_tag} | {elapsed:.1f}s ({prof['cap_sec']:.1f}s)",
                     fg="#fbbf24"
                 )
-            self.root.after(200, tick_timer)
+            self.root.after(150, tick_timer)
 
-        self.root.after(200, tick_timer)
+        self.root.after(150, tick_timer)
 
         threading.Thread(
             target=self._run_engine_worker,
-            args=(board_snapshot, fen_snapshot, want_top3, gen, prof, t_start),
+            args=(board_snapshot, fen_snapshot, want_top3, gen, prof, style_tag),
             daemon=True
         ).start()
 
-    def _run_engine_worker(self, board_snapshot, fen_snapshot, want_top3, gen, prof, t_start):
+    def _run_engine_worker(self, board_snapshot, fen_snapshot, want_top3, gen, prof, style_tag):
         side1_lines = []
         best_eval_cp = 0.0
         best_eval_str = "0.0"
         max_reached_depth = 0
         error_msg = None
+        total_elapsed = 0.0
 
         with self.engine_lock:
             if self.engine is None or self.analysis_generation != gen:
                 return
+            t_start = time.monotonic()
             try:
                 self._apply_rodent_difficulty_locked(force_max=False)
                 legal_moves = list(board_snapshot.legal_moves)
@@ -2213,23 +3618,21 @@ class ChessScreenApp:
                 if not legal_moves:
                     side1_lines = []
                 elif not want_top3:
-                    res = self.engine.analyse(
+                    res, _ = self._run_search_locked(
                         board_snapshot,
-                        chess.engine.Limit(time=prof["primary_time"], depth=prof["max_depth"])
+                        time_slice=prof["eff_budget"],
+                        gen=gen,
+                        collect_pvs=False
                     )
-                    if "score" in res:
+                    if res and "score" in res:
                         best_eval_str, best_eval_cp, _ = self._format_score_white(res["score"])
                         max_reached_depth = res.get("depth", 0)
                 else:
-                    side1_lines, d1 = self._compute_top3_distinct_locked(
+                    side1_lines, d1 = self._compute_top3_guaranteed_locked(
                         board_snapshot,
                         gen=gen,
                         t_start=t_start,
-                        primary_t=prof["primary_time"],
-                        refine_t=prof["refine_time"],
-                        screen_t=prof["screen_time"],
-                        max_cand=prof["max_candidates"],
-                        max_depth=prof["max_depth"],
+                        eff_budget=prof["eff_budget"],
                     )
                     max_reached_depth = max(max_reached_depth, d1)
 
@@ -2238,8 +3641,8 @@ class ChessScreenApp:
                         best_eval_cp = side1_lines[0][4]
             except Exception as e:
                 error_msg = str(e)
-
-        total_elapsed = time.monotonic() - t_start
+                self._restart_engine_locked()
+            total_elapsed = time.monotonic() - t_start
 
         def update_ui():
             if self.analysis_generation != gen or self.board.fen() != fen_snapshot:
@@ -2250,8 +3653,9 @@ class ChessScreenApp:
             if error_msg:
                 self.top3_arrows = []
                 self._draw_board()
-                self.top3_meta_lbl.config(text=f"Error | {total_elapsed:.1f}s", fg="#ff5555")
-                self._set_top3_message(f"Rodent IV error: {error_msg}", "err_text")
+                if want_top3:
+                    self.top3_meta_lbl.config(text=f"Error | {total_elapsed:.1f}s", fg="#ff5555")
+                    self._set_top3_message(f"Rodent IV error: {error_msg}", "err_text")
                 return
 
             self.current_eval_cp = best_eval_cp
@@ -2262,21 +3666,21 @@ class ChessScreenApp:
                 self._draw_eval_bar()
                 who = "White" if best_eval_cp > 0.2 else ("Black" if best_eval_cp < -0.2 else "Equal")
                 self.eval_detail_lbl.config(
-                    text=f"Score: {best_eval_str} ({who}) [{prof['rank_short']}, {total_elapsed:.1f}s]",
+                    text=f"Score: {best_eval_str} ({who}) [{prof['rank_short']}{style_tag}{depth_tag}, {total_elapsed:.2f}s]",
                     fg="#00ff66"
                 )
 
-            if self.show_top3_var.get():
+            if want_top3:
                 self.top3_meta_lbl.config(
-                    text=f"✓ {prof['rank_short']} | {total_elapsed:.1f}s / {MAX_ANALYSIS_SECONDS:.0f}s{depth_tag}",
+                    text=f"✓ {prof['rank_short']}{style_tag} | {total_elapsed:.2f}s ({prof['cap_sec']:.1f}s){depth_tag}",
                     fg="#00d4ff"
                 )
 
                 active_is_white = (board_snapshot.turn == chess.WHITE)
                 if active_is_white:
-                    self.side1_header_lbl.config(text="⚪ WHITE (to move):", fg="#f8fafc")
+                    self.side1_header_lbl.config(text=f"⚪ WHITE{style_tag} (to move):", fg="#f8fafc")
                 else:
-                    self.side1_header_lbl.config(text="⚫ BLACK (to move):", fg="#fbbf24")
+                    self.side1_header_lbl.config(text=f"⚫ BLACK{style_tag} (to move):", fg="#fbbf24")
 
                 if not side1_lines:
                     self.top3_arrows = []
@@ -2291,10 +3695,12 @@ class ChessScreenApp:
 
         self.root.after(0, update_ui)
 
-    # ================= BOARD DRAWING (COORDINATES + ARROWS) & PGN =================
+    # ================= BOARD DRAWING (COORDINATES + BOOK/ENGINE ARROWS) =================
     def _toggle_flip(self):
         self.flipped = not self.flipped
         self._draw_board()
+        if self.show_eval_var.get():
+            self._draw_eval_bar()
 
     def _reset_game(self):
         self.analysis_generation += 1
@@ -2313,10 +3719,9 @@ class ChessScreenApp:
 
         self.board = chess.Board()
         self.last_html_board_fen = self.board.board_fen()
-        self._draw_board()
         self._update_pgn_display()
         self._update_nav_buttons()
-        self._request_engine_analysis()
+        self._sync_book_and_engine_state(run_engine=True)
 
     def _square_to_canvas_center(self, square):
         file_idx = chess.square_file(square)
@@ -2326,11 +3731,65 @@ class ChessScreenApp:
         sq = self.board_size / 8.0
         return (col + 0.5) * sq, (row + 0.5) * sq
 
-    def _draw_move_arrows(self):
-        if not self.show_top3_var.get() or not self.top3_arrows:
+    def _draw_single_arrow(self, move, color, width, arrow_shape):
+        sq = self.board_size / 8.0
+        x1, y1 = self._square_to_canvas_center(move.from_square)
+        x2, y2 = self._square_to_canvas_center(move.to_square)
+
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = math.hypot(dx, dy)
+        if dist < 1e-3:
             return
 
+        ux = dx / dist
+        uy = dy / dist
+        start_pad = sq * 0.16
+        end_pad = sq * 0.12
+
+        sx = x1 + ux * start_pad
+        sy = y1 + uy * start_pad
+        ex = x2 - ux * end_pad
+        ey = y2 - uy * end_pad
+
+        self.canvas.create_line(
+            sx, sy, ex, ey,
+            fill=color,
+            width=width,
+            arrow=tk.LAST,
+            arrowshape=arrow_shape,
+            capstyle=tk.ROUND
+        )
+
+    def _draw_move_arrows(self):
         sq = self.board_size / 8.0
+
+        # 1) When Book Moves is active and book moves exist: draw ALL possible book arrows!
+        if self.show_book_var.get() and self.current_book_moves:
+            total = len(self.current_book_moves)
+            # Draw from least common to most common so #1 main line is drawn cleanly on top
+            for idx in range(total - 1, -1, -1):
+                mv = self.current_book_moves[idx][0]
+                color = BOOK_ARROW_PALETTE[min(idx, len(BOOK_ARROW_PALETTE) - 1)]
+                if idx == 0:
+                    width = max(8, round(sq * 0.20))
+                    arrow_shape = (round(sq * 0.32), round(sq * 0.36), round(sq * 0.20))
+                elif idx == 1:
+                    width = max(5, round(sq * 0.13))
+                    arrow_shape = (round(sq * 0.24), round(sq * 0.27), round(sq * 0.14))
+                elif idx == 2:
+                    width = max(3.5, round(sq * 0.085))
+                    arrow_shape = (round(sq * 0.19), round(sq * 0.22), round(sq * 0.11))
+                else:
+                    width = max(2.2, round(sq * 0.055))
+                    arrow_shape = (round(sq * 0.15), round(sq * 0.18), round(sq * 0.09))
+
+                self._draw_single_arrow(mv, color, width, arrow_shape)
+            return
+
+        # 2) Otherwise, if Top 3 Engine Moves is active, draw the 3 engine arrows
+        if not self.show_top3_var.get() or not self.top3_arrows:
+            return
 
         style_map = {
             1: (
@@ -2354,33 +3813,7 @@ class ChessScreenApp:
             if rank_num not in style_map:
                 continue
             color, width, arrow_shape = style_map[rank_num]
-            x1, y1 = self._square_to_canvas_center(move.from_square)
-            x2, y2 = self._square_to_canvas_center(move.to_square)
-
-            dx = x2 - x1
-            dy = y2 - y1
-            dist = math.hypot(dx, dy)
-            if dist < 1e-3:
-                continue
-
-            ux = dx / dist
-            uy = dy / dist
-            start_pad = sq * 0.16
-            end_pad = sq * 0.12
-
-            sx = x1 + ux * start_pad
-            sy = y1 + uy * start_pad
-            ex = x2 - ux * end_pad
-            ey = y2 - uy * end_pad
-
-            self.canvas.create_line(
-                sx, sy, ex, ey,
-                fill=color,
-                width=width,
-                arrow=tk.LAST,
-                arrowshape=arrow_shape,
-                capstyle=tk.ROUND
-            )
+            self._draw_single_arrow(move, color, width, arrow_shape)
 
     def _draw_board(self):
         self.canvas.delete("all")
