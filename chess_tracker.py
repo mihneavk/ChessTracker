@@ -27,49 +27,49 @@ DEFAULT_MAX_TIME_SECONDS = 3.0
 ENGINE_HASH_MB = 256
 ENGINE_THREADS = 2
 
-# Predefined Elo + Time + Search Mode presets for consistent, reliable analysis
+# Predefined Elo + Time + Depth Cap presets (clean alpha-beta evaluation without random eval_blur)
 ANALYSIS_PRESETS = {
     "⚡ Blitz / Beginner (1000 Elo • 0.5s)": {
         "elo": 1000,
         "time": 0.5,
-        "limit_strength": True,
-        "tag": "Beginner • Fast",
+        "max_depth": 4,
+        "tag": "Beginner • d4",
     },
     "🎯 Casual / Club (1350 Elo • 1.0s)": {
         "elo": 1350,
         "time": 1.0,
-        "limit_strength": True,
-        "tag": "Club • Quick",
+        "max_depth": 6,
+        "tag": "Club • d6",
     },
     "⚖️ Balanced / Intermediate (1650 Elo • 2.0s)": {
         "elo": 1650,
         "time": 2.0,
-        "limit_strength": True,
-        "tag": "Intermediate • Balanced",
+        "max_depth": 9,
+        "tag": "Intermediate • d9",
     },
     "🧠 Tactical / Advanced (2000 Elo • 3.0s)": {
         "elo": 2000,
         "time": 3.0,
-        "limit_strength": True,
-        "tag": "Advanced • Solid",
+        "max_depth": 12,
+        "tag": "Advanced • d12",
     },
     "🏆 Master / Accurate (2400 Elo • 5.0s)": {
         "elo": 2400,
         "time": 5.0,
-        "limit_strength": False,
-        "tag": "Master • Clean Search",
+        "max_depth": 16,
+        "tag": "Master • d16",
     },
     "👑 Grandmaster / Deep (2700 Elo • 7.5s)": {
         "elo": 2700,
         "time": 7.5,
-        "limit_strength": False,
-        "tag": "GM • Deep Analysis",
+        "max_depth": 20,
+        "tag": "GM • d20",
     },
     "🔥 MAX Engine / Full Power (~2975 • 10.0s)": {
         "elo": 2850,
         "time": 10.0,
-        "limit_strength": False,
-        "tag": "MAX • Full Strength",
+        "max_depth": None,
+        "tag": "MAX • Full Depth",
     },
 }
 
@@ -88,6 +88,15 @@ PIECE_TYPE_MAP = {
     'q': chess.QUEEN,
     'k': chess.KING,
 }
+
+UNICODE_FIGURINE_TRANSLATION = str.maketrans({
+    "♙": "", "♟": "",
+    "♘": "N", "♞": "N",
+    "♗": "B", "♝": "B",
+    "♖": "R", "♜": "R",
+    "♕": "Q", "♛": "Q",
+    "♔": "K", "♚": "K",
+})
 
 # Engine Top 3 Arrow Colors
 ARROW_COLORS = {
@@ -269,7 +278,7 @@ ECO_OPENING_LINES = [
 TAMPERMONKEY_SCRIPT = f"""// ==UserScript==
 // @name         ChessReader HTML Bridge
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  Sends live board state and move history from Chess.com to the Python tracker
 // @match        *://*.chess.com/*
 // @grant        GM_xmlhttpRequest
@@ -278,6 +287,28 @@ TAMPERMONKEY_SCRIPT = f"""// ==UserScript==
 
 (function() {{
     'use strict';
+
+    const FIG_MAP = {{
+        "♙": "", "♟": "",
+        "♘": "N", "♞": "N",
+        "♗": "B", "♝": "B",
+        "♖": "R", "♜": "R",
+        "♕": "Q", "♛": "Q",
+        "♔": "K", "♚": "K"
+    }};
+
+    function normalizeSan(raw) {{
+        let out = "";
+        for (const ch of raw) {{
+            out += (ch in FIG_MAP) ? FIG_MAP[ch] : ch;
+        }}
+        return out
+            .replace(/\\s+/g, "")
+            .replace(/^\\d+\\.+/, "")
+            .replace(/e\\.p\\./gi, "")
+            .replace(/[!?‼⁇⁉⁈]+$/g, "")
+            .trim();
+    }}
 
     function extractMoveSan(node) {{
         let san = "";
@@ -296,8 +327,7 @@ TAMPERMONKEY_SCRIPT = f"""// ==UserScript==
             }}
         }}
         walk(node);
-        san = san.replace(/\\s+/g, "").replace(/^\\d+\\.+/, "").replace(/[!?‼⁇⁉⁈]+$/g, "").trim();
-        return san;
+        return normalizeSan(san);
     }}
 
     function readBoardFromDOM() {{
@@ -400,7 +430,7 @@ def ensure_browser_extension_files():
     manifest = {
         "manifest_version": 3,
         "name": "ChessReader HTML Bridge",
-        "version": "1.2",
+        "version": "1.3",
         "description": "Reads live board state and move history from Chess.com HTML",
         "host_permissions": [
             "*://*.chess.com/*",
@@ -432,6 +462,28 @@ api.runtime.onMessage.addListener((msg) => {{
 
     content_js = """const api = typeof browser !== "undefined" ? browser : chrome;
 
+const FIG_MAP = {
+  "♙": "", "♟": "",
+  "♘": "N", "♞": "N",
+  "♗": "B", "♝": "B",
+  "♖": "R", "♜": "R",
+  "♕": "Q", "♛": "Q",
+  "♔": "K", "♚": "K"
+};
+
+function normalizeSan(raw) {
+  let out = "";
+  for (const ch of raw) {
+    out += (ch in FIG_MAP) ? FIG_MAP[ch] : ch;
+  }
+  return out
+    .replace(/\\s+/g, "")
+    .replace(/^\\d+\\.+/, "")
+    .replace(/e\\.p\\./gi, "")
+    .replace(/[!?‼⁇⁉⁈]+$/g, "")
+    .trim();
+}
+
 function extractMoveSan(node) {
   let san = "";
   function walk(el) {
@@ -449,8 +501,7 @@ function extractMoveSan(node) {
     }
   }
   walk(node);
-  san = san.replace(/\\s+/g, "").replace(/^\\d+\\.+/, "").replace(/[!?‼⁇⁉⁈]+$/g, "").trim();
-  return san;
+  return normalizeSan(san);
 }
 
 function readBoardFromDOM() {
@@ -702,6 +753,7 @@ class ChessScreenApp:
         self.engine_lock = threading.Lock()
         self.analysis_generation = 0
         self.is_analyzing = False
+        self.pending_analysis_skip_top3 = None
         self.current_eval_cp = 0.0
         self.current_eval_text = "0.0"
 
@@ -1458,9 +1510,9 @@ class ChessScreenApp:
 
     def _get_rank_profile(self, elo=None):
         """
-        Combines the selected Preset (or manual Elo + Time) into a deterministic
-        profile. Presets >= 2200 Elo disable UCI_LimitStrength blur so Rodent IV
-        thinks cleanly for the full time duration.
+        Maps Elo & Time presets into clean search time + depth budgets.
+        Always keeps UCI_LimitStrength=False during analysis so Rodent IV never
+        corrupts Top 3 move rankings with random eval_blur noise.
         """
         if elo is None:
             elo = int(self.elo_var.get())
@@ -1469,11 +1521,24 @@ class ChessScreenApp:
         preset_cfg = ANALYSIS_PRESETS.get(self.preset_var.get())
 
         if preset_cfg is not None:
-            use_limit_strength = bool(preset_cfg["limit_strength"])
+            max_depth = preset_cfg["max_depth"]
             mode_tag = preset_cfg["tag"]
         else:
-            use_limit_strength = (elo < 2200)
-            mode_tag = "Humanized Elo" if use_limit_strength else "Clean Engine"
+            if elo >= 2850:
+                max_depth = None
+            elif elo >= 2500:
+                max_depth = 18
+            elif elo >= 2200:
+                max_depth = 14
+            elif elo >= 1900:
+                max_depth = 11
+            elif elo >= 1600:
+                max_depth = 8
+            elif elo >= 1300:
+                max_depth = 6
+            else:
+                max_depth = 4
+            mode_tag = f"Custom • d{max_depth}" if max_depth else "Custom • Full Depth"
 
         if elo >= 2850:
             rank_short = "MAX (~2975)"
@@ -1500,7 +1565,7 @@ class ChessScreenApp:
             "rank_desc": rank_desc,
             "eff_budget": cap_sec,
             "cap_sec": cap_sec,
-            "use_limit_strength": use_limit_strength,
+            "max_depth": max_depth,
             "mode_tag": mode_tag,
         }
 
@@ -1514,7 +1579,7 @@ class ChessScreenApp:
         prof = self._get_rank_profile()
         elo = self.elo_var.get()
         pers = self.personality_var.get()
-        color = "#f59e0b" if elo >= 2850 else ("#10b981" if not prof["use_limit_strength"] else "#00d4ff")
+        color = "#f59e0b" if elo >= 2850 else ("#10b981" if elo >= 2200 else "#00d4ff")
 
         if pers and pers != "Default (Standard)":
             self.elo_value_lbl.config(text=f"{pers} • {prof['rank_short']}", fg=color)
@@ -1584,8 +1649,9 @@ class ChessScreenApp:
         return (b.board_fen(), b.turn, b.castling_rights, b.ep_square, len(b.move_stack))
 
     def _clean_san(self, raw_san):
-        s = raw_san.strip()
+        s = raw_san.translate(UNICODE_FIGURINE_TRANSLATION).strip()
         s = re.sub(r'^\d+\.+', '', s)
+        s = re.sub(r'e\.p\.', '', s, flags=re.IGNORECASE)
         s = re.sub(r'[!?‼⁇⁉⁈]+$', '', s)
         s = s.replace("0-0-0", "O-O-O").replace("0-0", "O-O")
         return s.strip()
@@ -1631,6 +1697,28 @@ class ChessScreenApp:
                 rights |= chess.BB_A8
         return rights
 
+    def _find_1_or_2_ply_continuation(self, base_board, target_board_fen):
+        """Finds exact 1-ply or 2-ply legal move sequence from base_board to target_board_fen."""
+        if base_board is None:
+            return None
+
+        for mv1 in base_board.legal_moves:
+            b1 = base_board.copy(stack=True)
+            b1.push(mv1)
+            if b1.board_fen() == target_board_fen:
+                return b1
+
+        for mv1 in base_board.legal_moves:
+            b1 = base_board.copy(stack=True)
+            b1.push(mv1)
+            for mv2 in b1.legal_moves:
+                b2 = b1.copy(stack=True)
+                b2.push(mv2)
+                if b2.board_fen() == target_board_fen:
+                    return b2
+
+        return None
+
     def _reconstruct_board_from_payload(self, payload, reference_board):
         pieces_data = payload.get("pieces", [])
         if not pieces_data:
@@ -1666,7 +1754,10 @@ class ChessScreenApp:
 
         states, valid_sans = self._build_sequence_states(incoming_sans)
 
-        if (
+        # Reset known sequence only if a genuinely new game started at move 0
+        if target_board_fen == chess.STARTING_BOARD_FEN and len(valid_sans) == 0:
+            self.known_san_sequence = []
+        elif (
             len(valid_sans) < len(self.known_san_sequence)
             and self.known_san_sequence[:len(valid_sans)] == valid_sans
         ):
@@ -1697,7 +1788,7 @@ class ChessScreenApp:
                         hl_matches.append(0)
                     elif idx > 0:
                         last_mv = states[idx].peek()
-                        if {last_mv.from_square, last_mv.to_square} == hl_squares:
+                        if {last_mv.from_square, last_mv.to_square}.issubset(hl_squares):
                             hl_matches.append(idx)
                 if len(hl_matches) == 1:
                     idx = hl_matches[0]
@@ -1708,6 +1799,13 @@ class ChessScreenApp:
             cur_ply = len(reference_board.move_stack) if reference_board is not None else total_plies
             best_idx = min(matching_indices, key=lambda i: abs(i - cur_ply))
             return states[best_idx].copy(stack=True), (best_idx, total_plies), full_match_moves
+
+        # Handle 1-ply / 2-ply lag between board DOM update and move-list DOM update
+        if total_plies > 0:
+            cont_from_seq = self._find_1_or_2_ply_continuation(states[-1], target_board_fen)
+            if cont_from_seq is not None:
+                ply_now = len(cont_from_seq.move_stack)
+                return cont_from_seq, (ply_now, ply_now), list(cont_from_seq.move_stack)
 
         if reference_board is not None:
             if reference_board.board_fen() == target_board_fen:
@@ -1721,14 +1819,12 @@ class ChessScreenApp:
                     ply_now = len(temp_back.move_stack)
                     return temp_back, (ply_now, max(ply_now, total_plies)), list(reference_board.move_stack)
 
-            for mv in reference_board.legal_moves:
-                b_next = reference_board.copy(stack=True)
-                b_next.push(mv)
-                if b_next.board_fen() == target_board_fen:
-                    ply_now = len(b_next.move_stack)
-                    return b_next, (ply_now, max(ply_now, total_plies)), list(b_next.move_stack)
+            cont_from_ref = self._find_1_or_2_ply_continuation(reference_board, target_board_fen)
+            if cont_from_ref is not None:
+                ply_now = len(cont_from_ref.move_stack)
+                return cont_from_ref, (ply_now, max(ply_now, total_plies)), list(cont_from_ref.move_stack)
 
-        self.known_san_sequence = []
+        # Fallback for custom/puzzle positions without move history (do NOT wipe known_san_sequence)
         dom_board.castling_rights = self._infer_castling_rights(dom_board)
 
         last_moved_color = None
@@ -1821,7 +1917,7 @@ class ChessScreenApp:
                 fg="#00ff66"
             )
 
-        if full_match_moves:
+        if full_match_moves and html_ply <= len(full_match_moves):
             target_board = chess.Board()
             for mv in full_match_moves[:html_ply]:
                 target_board.push(mv)
@@ -2006,6 +2102,8 @@ class ChessScreenApp:
                     init_opts["Hash"] = max(h_min, min(h_max, ENGINE_HASH_MB))
                 if "UseBook" in eng.options:
                     init_opts["UseBook"] = False
+                if "UCI_LimitStrength" in eng.options:
+                    init_opts["UCI_LimitStrength"] = False
                 if init_opts:
                     try:
                         eng.configure(init_opts)
@@ -2065,6 +2163,8 @@ class ChessScreenApp:
                 opts["Hash"] = max(eng.options["Hash"].min or 16, min(eng.options["Hash"].max or 2048, ENGINE_HASH_MB))
             if "UseBook" in eng.options:
                 opts["UseBook"] = False
+            if "UCI_LimitStrength" in eng.options:
+                opts["UCI_LimitStrength"] = False
             if opts:
                 eng.configure(opts)
             self._apply_rodent_difficulty_locked()
@@ -2114,30 +2214,14 @@ class ChessScreenApp:
             self._last_applied_book = None
             self._apply_rodent_book_locked()
 
-        prof = self._get_rank_profile()
-        if force_max or not prof["use_limit_strength"] or prof["elo"] >= 2850:
-            target_elo_state = "FULL_STRENGTH"
-        else:
-            target_elo_state = int(prof["elo"])
-
-        if target_elo_state != self._last_applied_elo:
-            opts = {}
-            if target_elo_state == "FULL_STRENGTH":
-                if "UCI_LimitStrength" in self.engine.options:
-                    opts["UCI_LimitStrength"] = False
-            else:
-                if "UCI_LimitStrength" in self.engine.options:
-                    opts["UCI_LimitStrength"] = True
-                if "UCI_Elo" in self.engine.options:
-                    min_elo = self.engine.options["UCI_Elo"].min or 600
-                    max_elo = self.engine.options["UCI_Elo"].max or 2800
-                    opts["UCI_Elo"] = max(min_elo, min(max_elo, target_elo_state))
-            if opts:
+        # Always keep UCI_LimitStrength=False so Rodent IV never injects random eval_blur noise into MultiPV
+        if self._last_applied_elo != "CLEAN_ALPHA_BETA":
+            if "UCI_LimitStrength" in self.engine.options:
                 try:
-                    self.engine.configure(opts)
+                    self.engine.configure({"UCI_LimitStrength": False})
                 except Exception:
                     pass
-            self._last_applied_elo = target_elo_state
+            self._last_applied_elo = "CLEAN_ALPHA_BETA"
 
     def _on_elo_changed(self, _val=None):
         self._sync_preset_from_manual_sliders()
@@ -2516,7 +2600,7 @@ class ChessScreenApp:
 
         self.time_hint_lbl = tk.Label(
             time_box,
-            text=f"Advanced • Solid | {DEFAULT_MAX_TIME_SECONDS:.1f}s search | {ENGINE_THREADS} threads",
+            text=f"Advanced • d12 | {DEFAULT_MAX_TIME_SECONDS:.1f}s search | {ENGINE_THREADS} threads",
             bg="#111111",
             fg="#9ca3af",
             font=("Consolas", 7)
@@ -3279,8 +3363,6 @@ class ChessScreenApp:
                         verdict_msg = f"Evaluation error: {e}"
                         verdict_color = "#ff5555"
                         self._restart_engine_locked()
-                    finally:
-                        self._apply_rodent_difficulty_locked(force_max=False)
 
             def finish_verdict():
                 if self.analysis_generation != gen:
@@ -3364,12 +3446,12 @@ class ChessScreenApp:
         return (-50000, san_cand, "0.0", san_cand, 0.0, mv), 0
 
     def _compute_top3_guaranteed_locked(
-        self, board_obj, gen, t_start, eff_budget
+        self, board_obj, gen, t_start, eff_budget, max_depth=None
     ):
         """
-        Guarantees 3 distinct moves and enforces the preset's time budget.
-        If Rodent IV exits MultiPV early due to UCI_LimitStrength internal throttling,
-        the remaining budget is spent refining candidate moves cleanly.
+        Interruptible MultiPV + full-legal-move verification.
+        Never drops quiet moves (evaluates ALL remaining legal moves if MultiPV
+        returns fewer than 3 lines) and always ranks strictly by mover score.
         """
         legal_moves = list(board_obj.legal_moves)
         if not legal_moves:
@@ -3380,28 +3462,38 @@ class ChessScreenApp:
         max_depth_reached = 0
         evaluated_map = {}
 
+        if len(legal_moves) == 1:
+            entry, d = self._evaluate_child_move_locked(
+                board_obj, legal_moves[0], max(0.20, eff_budget), gen, depth_limit=max_depth
+            )
+            return [(1, entry[1], entry[2], entry[3], entry[4], entry[5])], d
+
         if self.engine and "MultiPV" in self.engine.options:
             try:
-                mpv_infos = self.engine.analyse(
-                    board_obj,
-                    chess.engine.Limit(time=max(0.25, eff_budget)),
-                    multipv=target_k
-                )
-                if isinstance(mpv_infos, dict):
-                    mpv_infos = [mpv_infos]
-                if self.analysis_generation != gen:
-                    return [], 0
+                limit_kwargs = {"time": max(0.25, eff_budget)}
+                if max_depth is not None:
+                    limit_kwargs["depth"] = max_depth
+                limit = chess.engine.Limit(**limit_kwargs)
 
-                results = []
-                seen_mvs = set()
-                for info in mpv_infos:
+                latest_by_mpv = {}
+                with self.engine.analysis(board_obj, limit, multipv=target_k) as analysis:
+                    for info in analysis:
+                        if self.analysis_generation != gen:
+                            analysis.stop()
+                            return [], max_depth_reached
+                        pv = info.get("pv", [])
+                        if pv and "score" in info and pv[0] in board_obj.legal_moves:
+                            mpv_idx = info.get("multipv", 1)
+                            latest_by_mpv[mpv_idx] = info
+
+                for mpv_idx in sorted(latest_by_mpv.keys()):
+                    info = latest_by_mpv[mpv_idx]
                     pv = info.get("pv", [])
                     if not pv or "score" not in info:
                         continue
                     mv0 = pv[0]
-                    if mv0 not in board_obj.legal_moves or mv0 in seen_mvs:
+                    if mv0 not in board_obj.legal_moves:
                         continue
-                    seen_mvs.add(mv0)
                     max_depth_reached = max(max_depth_reached, info.get("depth", 0))
                     ev_str, ev_cp, white_sort_cp = self._format_score_white(info["score"])
                     mover_sort_cp = white_sort_cp if mover_is_white else -white_sort_cp
@@ -3415,88 +3507,43 @@ class ChessScreenApp:
                             break
                     san0 = board_obj.san(mv0)
                     line_txt = " ".join(line_sans)
-                    results.append((len(results) + 1, san0, ev_str, line_txt, ev_cp, mv0))
-                    evaluated_map[mv0] = (mover_sort_cp, san0, ev_str, line_txt, ev_cp, mv0)
-                    if len(results) >= target_k:
-                        break
+                    prev = evaluated_map.get(mv0)
+                    if prev is None or mover_sort_cp > prev[0]:
+                        evaluated_map[mv0] = (mover_sort_cp, san0, ev_str, line_txt, ev_cp, mv0)
 
-                elapsed_so_far = time.monotonic() - t_start
-                # If Rodent honored at least 45% of the requested timer and gave all target_k moves, return directly
-                if len(results) >= target_k and elapsed_so_far >= (eff_budget * 0.45):
+                if len(evaluated_map) >= target_k:
+                    sorted_mpv = sorted(evaluated_map.values(), key=lambda x: x[0], reverse=True)
+                    results = [
+                        (i + 1, san, ev_str, line_txt, ev_cp, mv0)
+                        for i, (_, san, ev_str, line_txt, ev_cp, mv0) in enumerate(sorted_mpv[:target_k])
+                    ]
                     return results, max_depth_reached
             except Exception:
                 pass
 
-        # Fallback / Early-exit refill: use the remaining preset budget across candidate moves
-        rem_after_mpv = max(0.15, eff_budget - (time.monotonic() - t_start))
-        if not evaluated_map:
-            stage1_time = max(0.15, rem_after_mpv * 0.35)
-            info_root, root_seen_moves = self._run_search_locked(
-                board_obj,
-                time_slice=stage1_time,
-                gen=gen,
-                collect_pvs=True
-            )
-            if self.analysis_generation != gen:
-                return [], max_depth_reached
-
-            if info_root and "score" in info_root and info_root.get("pv"):
-                mv0 = info_root["pv"][0]
-                if mv0 in board_obj.legal_moves:
-                    max_depth_reached = max(max_depth_reached, info_root.get("depth", 0))
-                    ev_str, ev_cp, white_sort_cp = self._format_score_white(info_root["score"])
-                    mover_sort_cp = white_sort_cp if mover_is_white else -white_sort_cp
-                    tb = board_obj.copy(stack=False)
-                    line_sans = []
-                    for m in info_root["pv"][:3]:
-                        if m in tb.legal_moves:
-                            line_sans.append(tb.san(m))
-                            tb.push(m)
-                        else:
-                            break
-                    evaluated_map[mv0] = (
-                        mover_sort_cp,
-                        board_obj.san(mv0),
-                        ev_str,
-                        " ".join(line_sans),
-                        ev_cp,
-                        mv0,
-                    )
-        else:
-            root_seen_moves = list(evaluated_map.keys())
-
-        if len(legal_moves) == 1:
-            if not evaluated_map:
-                entry, d = self._evaluate_child_move_locked(board_obj, legal_moves[0], max(0.20, eff_budget), gen)
-                evaluated_map[legal_moves[0]] = entry
-                max_depth_reached = max(max_depth_reached, d)
-            only = list(evaluated_map.values())[0]
-            return [(1, only[1], only[2], only[3], only[4], only[5])], max_depth_reached
-
+        # Full fallback across ALL remaining legal moves (never truncate to 12!)
         remaining_moves = [m for m in legal_moves if m not in evaluated_map]
         remaining_moves.sort(
-            key=lambda m: (1 if m in root_seen_moves else 0, self._quick_move_order_score(board_obj, m)),
+            key=lambda m: self._quick_move_order_score(board_obj, m),
             reverse=True
         )
-        candidate_pool = remaining_moves[:12]
 
-        rem_budget = max(0.15, eff_budget - (time.monotonic() - t_start))
-        screen_budget = rem_budget * 0.45
-        per_screen_slice = max(0.03, screen_budget / max(1, len(candidate_pool)))
+        rem_budget = max(0.25, eff_budget - (time.monotonic() - t_start))
+        screen_budget = rem_budget * 0.55
+        per_screen_slice = max(0.025, screen_budget / max(1, len(remaining_moves)))
 
-        screen_results = []
-        for mv in candidate_pool:
+        for mv in remaining_moves:
             if self.analysis_generation != gen:
                 return [], max_depth_reached
             entry, d = self._evaluate_child_move_locked(
-                board_obj, mv, per_screen_slice, gen
+                board_obj, mv, per_screen_slice, gen, depth_limit=max_depth
             )
             max_depth_reached = max(max_depth_reached, d)
-            screen_results.append(entry)
+            evaluated_map[mv] = entry
 
-        screen_results.sort(key=lambda item: item[0], reverse=True)
+        ranked_all = sorted(evaluated_map.values(), key=lambda item: item[0], reverse=True)
+        top_verify_candidates = [item[5] for item in ranked_all[:min(4, len(ranked_all))]]
 
-        top_verify_candidates = [item[5] for item in screen_results[:target_k]]
         remaining_time = max(0.15, eff_budget - (time.monotonic() - t_start))
         per_verify_slice = max(0.08, remaining_time / max(1, len(top_verify_candidates)))
 
@@ -3504,20 +3551,12 @@ class ChessScreenApp:
             if self.analysis_generation != gen:
                 return [], max_depth_reached
             entry, d = self._evaluate_child_move_locked(
-                board_obj, mv, per_verify_slice, gen
+                board_obj, mv, per_verify_slice, gen, depth_limit=max_depth
             )
             max_depth_reached = max(max_depth_reached, d)
             evaluated_map[mv] = entry
 
-        for entry in screen_results:
-            if len(evaluated_map) >= target_k:
-                break
-            if entry[5] not in evaluated_map:
-                evaluated_map[entry[5]] = entry
-
-        final_entries = list(evaluated_map.values())
-        final_entries.sort(key=lambda item: item[0], reverse=True)
-
+        final_entries = sorted(evaluated_map.values(), key=lambda item: item[0], reverse=True)
         results = [
             (i + 1, san, ev_str, line_txt, ev_cp, mv0)
             for i, (_, san, ev_str, line_txt, ev_cp, mv0) in enumerate(final_entries[:target_k])
@@ -3626,14 +3665,19 @@ class ChessScreenApp:
                 )
 
     def _request_engine_analysis(self, skip_top3=False):
-        if self.engine is None:
-            return
-
         want_top3 = self.show_top3_var.get() and not skip_top3
         want_eval = self.show_eval_var.get()
 
         if not (want_eval or want_top3):
             return
+
+        if self.engine is None:
+            self.pending_analysis_skip_top3 = skip_top3
+            if want_top3:
+                self._set_top3_message("Engine starting... will calculate automatically.", "warn_text")
+            return
+
+        self.pending_analysis_skip_top3 = None
 
         if not self.board.is_valid():
             if want_top3:
@@ -3715,6 +3759,7 @@ class ChessScreenApp:
         max_reached_depth = 0
         error_msg = None
         total_elapsed = 0.0
+        completed_for_gen = False
 
         with self.engine_lock:
             if self.engine is None or self.analysis_generation != gen:
@@ -3731,7 +3776,8 @@ class ChessScreenApp:
                         board_snapshot,
                         time_slice=prof["eff_budget"],
                         gen=gen,
-                        collect_pvs=False
+                        collect_pvs=False,
+                        target_depth=prof["max_depth"],
                     )
                     if res and "score" in res:
                         best_eval_str, best_eval_cp, _ = self._format_score_white(res["score"])
@@ -3742,22 +3788,33 @@ class ChessScreenApp:
                         gen=gen,
                         t_start=t_start,
                         eff_budget=prof["eff_budget"],
+                        max_depth=prof["max_depth"],
                     )
                     max_reached_depth = max(max_reached_depth, d1)
 
                     if side1_lines:
                         best_eval_str = side1_lines[0][2]
                         best_eval_cp = side1_lines[0][4]
+                completed_for_gen = (self.analysis_generation == gen)
             except Exception as e:
                 error_msg = str(e)
                 self._restart_engine_locked()
+                completed_for_gen = (self.analysis_generation == gen)
             total_elapsed = time.monotonic() - t_start
 
         def update_ui():
-            if self.analysis_generation != gen or self.board.fen() != fen_snapshot:
+            if self.analysis_generation != gen:
                 return
 
             self.is_analyzing = False
+
+            if self.board.fen() != fen_snapshot:
+                # Board changed while worker finished -> immediately re-trigger for current board
+                self._sync_book_and_engine_state(run_engine=True)
+                return
+
+            if not completed_for_gen:
+                return
 
             if error_msg:
                 self.top3_arrows = []
