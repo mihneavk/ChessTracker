@@ -738,8 +738,11 @@ class ChessScreenApp:
         self.selected_square = None
         self.legal_targets_for_selected = set()
 
-        # Arrows for Top 3 engine moves: list of (rank_int, chess.Move)
+        # Arrows & cached results for Top 3 engine moves
         self.top3_arrows = []
+        self.top3_fen = None
+        self.top3_lines = []
+        self.top3_meta_cached = ""
         self.preview_canvases = []
         self.book_preview_canvases = []
 
@@ -753,6 +756,7 @@ class ChessScreenApp:
         self.engine_lock = threading.Lock()
         self.analysis_generation = 0
         self.is_analyzing = False
+        self.is_evaluating_verdict = False
         self.pending_analysis_skip_top3 = None
         self.current_eval_cp = 0.0
         self.current_eval_text = "0.0"
@@ -820,6 +824,12 @@ class ChessScreenApp:
             ).start()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _clear_top3_cache(self):
+        self.top3_arrows = []
+        self.top3_fen = None
+        self.top3_lines = []
+        self.top3_meta_cached = ""
 
     # ================= ECO OPENING BANNER & POLYGLOT BOOK READER =================
     def _build_eco_database(self):
@@ -1093,7 +1103,7 @@ class ChessScreenApp:
 
         self.selected_square = None
         self.legal_targets_for_selected = set()
-        self.top3_arrows = []
+        self._clear_top3_cache()
 
         self._update_pgn_display()
         self._update_nav_buttons()
@@ -1107,6 +1117,7 @@ class ChessScreenApp:
             )
             self._sync_book_and_engine_state(run_engine=True)
         else:
+            self.is_evaluating_verdict = True
             self._sync_book_and_engine_state(run_engine=False)
             self._evaluate_tried_move(board_before, board_after, move, san_move)
 
@@ -1252,7 +1263,7 @@ class ChessScreenApp:
         if want_top3 and book_blocks_top3:
             self.analysis_generation += 1
             self.is_analyzing = False
-            self.top3_arrows = []
+            self._clear_top3_cache()
             self.top3_meta_lbl.config(
                 text=f"⏸ Paused (In Book: {len(book_moves)} moves)",
                 fg="#10b981"
@@ -1266,18 +1277,54 @@ class ChessScreenApp:
                 self._request_engine_analysis(skip_top3=True)
             return
 
-        if want_top3 and not run_engine:
-            prof = self._get_rank_profile()
+        current_fen = self.board.fen()
+        has_cached_top3 = (
+            want_top3
+            and self.top3_fen == current_fen
+            and len(self.top3_lines) > 0
+        )
+
+        if has_cached_top3:
             style_tag = self._get_active_style_tag()
             if self.board.turn == chess.WHITE:
                 self.side1_header_lbl.config(text=f"⚪ WHITE{style_tag} (to move):", fg="#f8fafc")
             else:
                 self.side1_header_lbl.config(text=f"⚫ BLACK{style_tag} (to move):", fg="#fbbf24")
-            self.top3_meta_lbl.config(
-                text=f"⏳ {prof['rank_short']}{style_tag} | Out of book — preparing Top 3...",
-                fg="#fbbf24"
-            )
-            self._set_top3_message("Out of book — preparing Top 3 Moves...", "warn_text")
+            if self.top3_meta_cached:
+                self.top3_meta_lbl.config(text=self.top3_meta_cached, fg="#00d4ff")
+            self.top3_arrows = [
+                (r, mv_obj) for r, _, _, _, _, mv_obj in self.top3_lines if mv_obj is not None
+            ]
+            self._set_top3_lines(self.top3_lines)
+            self._draw_board()
+            if run_engine and want_eval and not want_top3:
+                self._request_engine_analysis(skip_top3=True)
+            return
+
+        if want_top3 and not run_engine:
+            if not self.is_analyzing:
+                prof = self._get_rank_profile()
+                style_tag = self._get_active_style_tag()
+                if self.board.turn == chess.WHITE:
+                    self.side1_header_lbl.config(text=f"⚪ WHITE{style_tag} (to move):", fg="#f8fafc")
+                else:
+                    self.side1_header_lbl.config(text=f"⚫ BLACK{style_tag} (to move):", fg="#fbbf24")
+
+                if self.is_evaluating_verdict:
+                    self.top3_meta_lbl.config(
+                        text=f"⏳ {prof['rank_short']}{style_tag} | Checking played move first...",
+                        fg="#fbbf24"
+                    )
+                    self._set_top3_message("Checking played move first, then calculating Top 3...", "warn_text")
+                elif self.engine is not None:
+                    # Engine is ready and no analysis is running yet -> start Top 3 immediately
+                    run_engine = True
+                else:
+                    self.top3_meta_lbl.config(
+                        text=f"⏳ {prof['rank_short']}{style_tag} | Out of book — preparing Top 3...",
+                        fg="#fbbf24"
+                    )
+                    self._set_top3_message("Out of book — preparing Top 3 Moves...", "warn_text")
 
         self._draw_board()
 
@@ -1343,6 +1390,7 @@ class ChessScreenApp:
         self.chk_top3.config(text=f"Top 3 Moves + Arrows ({cap_sec:.1f}s)")
         self._update_elo_labels()
         self._last_applied_elo = None
+        self._clear_top3_cache()
         self.analysis_generation += 1
         self._sync_book_and_engine_state(run_engine=True)
 
@@ -1364,6 +1412,7 @@ class ChessScreenApp:
         self.time_value_lbl.config(text=f"⏱ Target Time: {cap_sec:.1f}s")
         self.chk_top3.config(text=f"Top 3 Moves + Arrows ({cap_sec:.1f}s)")
         self._update_elo_labels()
+        self._clear_top3_cache()
         self.analysis_generation += 1
         self._sync_book_and_engine_state(run_engine=True)
 
@@ -1505,6 +1554,7 @@ class ChessScreenApp:
                 self._sync_preset_from_manual_sliders()
 
         self._update_elo_labels()
+        self._clear_top3_cache()
         self.analysis_generation += 1
         self._sync_book_and_engine_state(run_engine=True)
 
@@ -1824,7 +1874,7 @@ class ChessScreenApp:
                 ply_now = len(cont_from_ref.move_stack)
                 return cont_from_ref, (ply_now, max(ply_now, total_plies)), list(cont_from_ref.move_stack)
 
-        # Fallback for custom/puzzle positions without move history (do NOT wipe known_san_sequence)
+        # Fallback for custom/puzzle positions without move history
         dom_board.castling_rights = self._infer_castling_rights(dom_board)
 
         last_moved_color = None
@@ -1930,7 +1980,7 @@ class ChessScreenApp:
         self.board = target_board
 
         if board_changed:
-            self.top3_arrows = []
+            self._clear_top3_cache()
 
         self._update_pgn_display()
         self._update_nav_buttons()
@@ -2226,6 +2276,7 @@ class ChessScreenApp:
     def _on_elo_changed(self, _val=None):
         self._sync_preset_from_manual_sliders()
         self._update_elo_labels()
+        self._clear_top3_cache()
         self.analysis_generation += 1
         self._sync_book_and_engine_state(run_engine=True)
 
@@ -2382,7 +2433,7 @@ class ChessScreenApp:
 
         # ================= RIGHT SIDE (ENGINE + PRESETS + BOOK MOVES + TOP 3 MOVES + NAV + PGN) =================
         top_hdr = tk.Frame(right_frame, bg="#0a0a0a")
-        top_hdr.pack(fill="x", padx=12, pady=(8, 2))
+        top_hdr.pack(fill="x", padx=12, pady=(6, 1))
 
         tk.Label(
             top_hdr,
@@ -2416,14 +2467,14 @@ class ChessScreenApp:
             font=("Consolas", 8),
             anchor="w"
         )
-        self.engine_status_lbl.pack(fill="x", padx=12, pady=(0, 4))
+        self.engine_status_lbl.pack(fill="x", padx=12, pady=(0, 3))
 
         # --- PRESET + ELO + PLAYER STYLE + OPENING BOOK BOX ---
         diff_frame = tk.Frame(right_frame, bg="#111111", highlightthickness=1, highlightbackground="#222222")
-        diff_frame.pack(fill="x", padx=12, pady=(0, 5))
+        diff_frame.pack(fill="x", padx=12, pady=(0, 4))
 
         preset_row = tk.Frame(diff_frame, bg="#111111")
-        preset_row.pack(fill="x", padx=12, pady=(6, 3))
+        preset_row.pack(fill="x", padx=12, pady=(5, 2))
 
         tk.Label(
             preset_row,
@@ -2455,7 +2506,7 @@ class ChessScreenApp:
             fg="#00d4ff",
             font=("Consolas", 9, "bold")
         )
-        self.elo_value_lbl.pack(pady=(2, 0))
+        self.elo_value_lbl.pack(pady=(1, 0))
 
         self.elo_slider = tk.Scale(
             diff_frame,
@@ -2474,10 +2525,10 @@ class ChessScreenApp:
             length=375,
             cursor="hand2"
         )
-        self.elo_slider.pack(padx=12, pady=(1, 3))
+        self.elo_slider.pack(padx=12, pady=(1, 2))
 
         pers_row = tk.Frame(diff_frame, bg="#111111")
-        pers_row.pack(fill="x", padx=12, pady=(0, 4))
+        pers_row.pack(fill="x", padx=12, pady=(0, 3))
 
         tk.Label(
             pers_row,
@@ -2512,7 +2563,7 @@ class ChessScreenApp:
 
         # --- OPENING BOOK SELECTOR ROW (DEFAULTS TO main/rodent.bin) ---
         book_row = tk.Frame(diff_frame, bg="#111111")
-        book_row.pack(fill="x", padx=12, pady=(0, 5))
+        book_row.pack(fill="x", padx=12, pady=(0, 4))
 
         tk.Label(
             book_row,
@@ -2568,7 +2619,7 @@ class ChessScreenApp:
             highlightthickness=1,
             highlightbackground="#222222"
         )
-        time_box.pack(fill="x", padx=12, pady=(0, 5))
+        time_box.pack(fill="x", padx=12, pady=(0, 4))
 
         self.time_value_lbl = tk.Label(
             time_box,
@@ -2577,7 +2628,7 @@ class ChessScreenApp:
             fg="#00ff66",
             font=("Consolas", 9, "bold")
         )
-        self.time_value_lbl.pack(pady=(3, 0))
+        self.time_value_lbl.pack(pady=(2, 0))
 
         self.time_slider = tk.Scale(
             time_box,
@@ -2605,7 +2656,7 @@ class ChessScreenApp:
             fg="#9ca3af",
             font=("Consolas", 7)
         )
-        self.time_hint_lbl.pack(pady=(0, 3))
+        self.time_hint_lbl.pack(pady=(0, 2))
 
         # --- 1) POSITION EVALUATION BAR CHECKBOX ---
         self.chk_eval = tk.Checkbutton(
@@ -2632,7 +2683,7 @@ class ChessScreenApp:
             font=("Consolas", 8),
             anchor="w"
         )
-        self.eval_detail_lbl.pack(fill="x", padx=34, pady=(0, 2))
+        self.eval_detail_lbl.pack(fill="x", padx=34, pady=(0, 1))
 
         # --- 2) DEDICATED BOOK MOVES CHECKBOX + PANEL ---
         self.chk_book = tk.Checkbutton(
@@ -2649,7 +2700,7 @@ class ChessScreenApp:
             anchor="w",
             cursor="hand2"
         )
-        self.chk_book.pack(fill="x", padx=14, pady=(0, 2))
+        self.chk_book.pack(fill="x", padx=14, pady=(0, 1))
 
         self.book_moves_frame = tk.Frame(
             right_frame,
@@ -2657,7 +2708,7 @@ class ChessScreenApp:
             highlightthickness=1,
             highlightbackground="#1e3a2f"
         )
-        self.book_moves_frame.pack(fill="x", padx=12, pady=(0, 5))
+        self.book_moves_frame.pack(fill="x", padx=12, pady=(0, 4))
 
         self.book_meta_lbl = tk.Label(
             self.book_moves_frame,
@@ -2672,7 +2723,7 @@ class ChessScreenApp:
         self.book_meta_lbl.pack(fill="x")
 
         book_body = tk.Frame(self.book_moves_frame, bg="#121212")
-        book_body.pack(fill="x", padx=6, pady=3)
+        book_body.pack(fill="x", padx=6, pady=2)
         book_body.columnconfigure(0, weight=1)
         book_body.rowconfigure(0, weight=1)
 
@@ -2726,7 +2777,7 @@ class ChessScreenApp:
             anchor="w",
             cursor="hand2"
         )
-        self.chk_top3.pack(fill="x", padx=14, pady=(0, 2))
+        self.chk_top3.pack(fill="x", padx=14, pady=(0, 1))
 
         self.top3_frame = tk.Frame(
             right_frame,
@@ -2734,7 +2785,7 @@ class ChessScreenApp:
             highlightthickness=1,
             highlightbackground="#2a2a2a"
         )
-        self.top3_frame.pack(fill="x", padx=12, pady=(0, 5))
+        self.top3_frame.pack(fill="x", padx=12, pady=(0, 4))
 
         self.top3_meta_lbl = tk.Label(
             self.top3_frame,
@@ -2756,7 +2807,7 @@ class ChessScreenApp:
             font=("Consolas", 8, "bold"),
             anchor="w"
         )
-        self.side1_header_lbl.pack(fill="x", padx=8, pady=(4, 1))
+        self.side1_header_lbl.pack(fill="x", padx=8, pady=(3, 1))
 
         self.top3_text = tk.Text(
             self.top3_frame,
@@ -2779,7 +2830,7 @@ class ChessScreenApp:
         self.top3_text.tag_configure("info_text", foreground="#6b7280", font=("Consolas", 8))
         self.top3_text.tag_configure("warn_text", foreground="#fbbf24", font=("Consolas", 8))
         self.top3_text.tag_configure("err_text", foreground="#ff5555", font=("Consolas", 8))
-        self.top3_text.pack(fill="x", pady=(0, 4))
+        self.top3_text.pack(fill="x", pady=(0, 3))
         self._set_top3_message("Check box to calculate & show engine arrows.", "info_text")
 
         # ================= HISTORY NAVIGATION & MOVE VERDICT BOX =================
@@ -2789,10 +2840,10 @@ class ChessScreenApp:
             highlightthickness=1,
             highlightbackground="#2e3b4e"
         )
-        sandbox_box.pack(fill="x", padx=12, pady=(0, 5))
+        sandbox_box.pack(fill="x", padx=12, pady=(0, 4))
 
         nav_btn_row = tk.Frame(sandbox_box, bg="#121212")
-        nav_btn_row.pack(fill="x", padx=8, pady=(5, 4))
+        nav_btn_row.pack(fill="x", padx=8, pady=(4, 3))
 
         self.back_btn = tk.Button(
             nav_btn_row,
@@ -2846,7 +2897,7 @@ class ChessScreenApp:
             cursor="hand2",
             state="disabled"
         )
-        self.exit_try_btn.pack(fill="x", padx=8, pady=(0, 4))
+        self.exit_try_btn.pack(fill="x", padx=8, pady=(0, 3))
 
         self.move_verdict_lbl = tk.Label(
             sandbox_box,
@@ -2859,7 +2910,7 @@ class ChessScreenApp:
             wraplength=390,
             height=2
         )
-        self.move_verdict_lbl.pack(fill="x", padx=8, pady=(0, 5))
+        self.move_verdict_lbl.pack(fill="x", padx=8, pady=(0, 4))
 
         # ================= COMPACT PGN NOTATION BOX =================
         pgn_box = tk.Frame(
@@ -2868,7 +2919,7 @@ class ChessScreenApp:
             highlightthickness=1,
             highlightbackground="#262626"
         )
-        pgn_box.pack(fill="x", padx=12, pady=(0, 6))
+        pgn_box.pack(fill="x", padx=12, pady=(0, 5))
 
         pgn_header_bar = tk.Frame(pgn_box, bg="#18181b")
         pgn_header_bar.pack(fill="x")
@@ -2901,7 +2952,7 @@ class ChessScreenApp:
         self.copy_pgn_btn.pack(side=tk.RIGHT, padx=4)
 
         pgn_body = tk.Frame(pgn_box, bg="#0d0d0d")
-        pgn_body.pack(fill="x", padx=6, pady=4)
+        pgn_body.pack(fill="x", padx=6, pady=3)
         pgn_body.columnconfigure(0, weight=1)
         pgn_body.rowconfigure(0, weight=1)
 
@@ -2957,6 +3008,8 @@ class ChessScreenApp:
         self._clear_preview_canvases()
         self.top3_text.delete("1.0", tk.END)
         self.top3_text.insert(tk.END, msg, tag)
+        self.top3_text.yview_moveto(0.0)
+        self.top3_text.xview_moveto(0.0)
         self.top3_text.config(state="disabled")
 
     def _set_top3_lines(self, lines):
@@ -2996,6 +3049,8 @@ class ChessScreenApp:
             self.top3_text.window_create(tk.END, window=mini_cv, align="center")
             self.top3_text.insert(tk.END, f" {san} [{sc}] -> {ln}", "move_text")
 
+        self.top3_text.yview_moveto(0.0)
+        self.top3_text.xview_moveto(0.0)
         self.top3_text.config(state="disabled")
 
     # ================= ADAPTIVE CONTROLS LAYOUT & BOARD RESIZING =================
@@ -3137,7 +3192,7 @@ class ChessScreenApp:
         self.board = b
         self.selected_square = None
         self.legal_targets_for_selected = set()
-        self.top3_arrows = []
+        self._clear_top3_cache()
 
         self._update_pgn_display()
         self._update_nav_buttons()
@@ -3189,13 +3244,14 @@ class ChessScreenApp:
     def _exit_sandbox_mode(self):
         self.analysis_generation += 1
         self.is_analyzing = False
+        self.is_evaluating_verdict = False
 
         self.sandbox_mode = False
         self.sandbox_moves = []
         self.manual_history_nav = False
         self.selected_square = None
         self.legal_targets_for_selected = set()
-        self.top3_arrows = []
+        self._clear_top3_cache()
 
         self.view_ply = self.last_html_ply
         if self.match_moves:
@@ -3282,11 +3338,13 @@ class ChessScreenApp:
 
     def _evaluate_tried_move(self, board_before, board_after, played_move, san_move):
         if not self._ensure_engine_ready():
+            self.is_evaluating_verdict = False
             self._sync_book_and_engine_state(run_engine=True)
             return
 
         self.analysis_generation += 1
         gen = self.analysis_generation
+        self.is_evaluating_verdict = True
         style_tag = self._get_active_style_tag()
 
         self.move_verdict_lbl.config(
@@ -3367,6 +3425,7 @@ class ChessScreenApp:
             def finish_verdict():
                 if self.analysis_generation != gen:
                     return
+                self.is_evaluating_verdict = False
                 if verdict_msg:
                     self.move_verdict_lbl.config(text=verdict_msg, fg=verdict_color)
                 self._sync_book_and_engine_state(run_engine=True)
@@ -3521,7 +3580,7 @@ class ChessScreenApp:
             except Exception:
                 pass
 
-        # Full fallback across ALL remaining legal moves (never truncate to 12!)
+        # Full fallback across ALL remaining legal moves
         remaining_moves = [m for m in legal_moves if m not in evaluated_map]
         remaining_moves.sort(
             key=lambda m: self._quick_move_order_score(board_obj, m),
@@ -3584,9 +3643,10 @@ class ChessScreenApp:
             if not self._ensure_engine_ready():
                 self.show_top3_var.set(False)
                 return
+            self._clear_top3_cache()
             self._sync_book_and_engine_state(run_engine=True)
         else:
-            self.top3_arrows = []
+            self._clear_top3_cache()
             self._draw_board()
             style_tag = self._get_active_style_tag()
             self.top3_meta_lbl.config(
@@ -3685,7 +3745,7 @@ class ChessScreenApp:
             return
 
         if self.board.is_game_over():
-            self.top3_arrows = []
+            self._clear_top3_cache()
             self._draw_board()
             if self.board.is_checkmate():
                 winner = "Black" if self.board.turn == chess.WHITE else "White"
@@ -3817,7 +3877,7 @@ class ChessScreenApp:
                 return
 
             if error_msg:
-                self.top3_arrows = []
+                self._clear_top3_cache()
                 self._draw_board()
                 if want_top3:
                     self.top3_meta_lbl.config(text=f"Error | {total_elapsed:.1f}s", fg="#ff5555")
@@ -3837,10 +3897,8 @@ class ChessScreenApp:
                 )
 
             if want_top3:
-                self.top3_meta_lbl.config(
-                    text=f"✓ {prof['rank_short']}{style_tag} | {total_elapsed:.2f}s ({prof['cap_sec']:.1f}s){depth_tag}",
-                    fg="#00d4ff"
-                )
+                meta_txt = f"✓ {prof['rank_short']}{style_tag} | {total_elapsed:.2f}s ({prof['cap_sec']:.1f}s){depth_tag}"
+                self.top3_meta_lbl.config(text=meta_txt, fg="#00d4ff")
 
                 active_is_white = (board_snapshot.turn == chess.WHITE)
                 if active_is_white:
@@ -3849,9 +3907,12 @@ class ChessScreenApp:
                     self.side1_header_lbl.config(text=f"⚫ BLACK{style_tag} (to move):", fg="#fbbf24")
 
                 if not side1_lines:
-                    self.top3_arrows = []
+                    self._clear_top3_cache()
                     self._set_top3_message("No legal moves available.", "info_text")
                 else:
+                    self.top3_fen = fen_snapshot
+                    self.top3_lines = list(side1_lines)
+                    self.top3_meta_cached = meta_txt
                     self.top3_arrows = [
                         (r, mv_obj) for r, _, _, _, _, mv_obj in side1_lines if mv_obj is not None
                     ]
@@ -3871,13 +3932,14 @@ class ChessScreenApp:
     def _reset_game(self):
         self.analysis_generation += 1
         self.is_analyzing = False
+        self.is_evaluating_verdict = False
         self.sandbox_mode = False
         self.sandbox_moves = []
         self.sandbox_base_ply = 0
         self.manual_history_nav = False
         self.selected_square = None
         self.legal_targets_for_selected = set()
-        self.top3_arrows = []
+        self._clear_top3_cache()
         self.known_san_sequence = []
         self.match_moves = []
         self.last_html_ply = 0
